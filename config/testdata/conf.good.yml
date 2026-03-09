@@ -459,6 +459,10 @@ storage:
       size: 1GB
       percentage: 28
 
+scrape_memory_limiter:
+  check_interval: 10s
+  limit_mib: 100
+
 tracing:
   endpoint: "localhost:4317"
   client_type: "grpc"

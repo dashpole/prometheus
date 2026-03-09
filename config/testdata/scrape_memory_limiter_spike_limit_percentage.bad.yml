@@ -1,0 +1,3 @@
+scrape_memory_limiter:
+  limit_percentage: 50
+  spike_limit_percentage: 50

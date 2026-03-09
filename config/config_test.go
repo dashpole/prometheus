@@ -178,6 +178,14 @@ var expectedConf = &Config{
 		LabelNamePreserveMultipleUnderscores: true,
 	},
 
+	ScrapeMemoryLimiter: &ScrapeMemoryLimiterConfig{
+		CheckInterval:        model.Duration(10 * time.Second),
+		LimitMiB:             100,
+		SpikeLimitMiB:        20,
+		LimitPercentage:      0,
+		SpikeLimitPercentage: 0,
+	},
+
 	RemoteReadConfigs: []*RemoteReadConfig{
 		{
 			URL:              mustParseURL("http://remote1/read"),
@@ -2626,6 +2634,26 @@ var expectedErrors = []struct {
 		filename: "stackit_endpoint.bad.yml",
 		errMsg:   "invalid endpoint",
 	},
+	{
+		filename: "scrape_memory_limiter_empty.bad.yml",
+		errMsg:   "scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set",
+	},
+	{
+		filename: "scrape_memory_limiter_limit_percentage.bad.yml",
+		errMsg:   "scrape_memory_limiter limit_percentage cannot be greater than 100",
+	},
+	{
+		filename: "scrape_memory_limiter_spike_percentage.bad.yml",
+		errMsg:   "scrape_memory_limiter spike_limit_percentage cannot be greater than 100",
+	},
+	{
+		filename: "scrape_memory_limiter_spike_mib.bad.yml",
+		errMsg:   "scrape_memory_limiter spike_limit_mib must be less than limit_mib",
+	},
+	{
+		filename: "scrape_memory_limiter_spike_limit_percentage.bad.yml",
+		errMsg:   "scrape_memory_limiter spike_limit_percentage must be less than limit_percentage",
+	},
 }
 
 func TestBadConfigs(t *testing.T) {
@@ -3376,4 +3404,73 @@ func TestGetScrapeConfigs_Loaded(t *testing.T) {
 		_, err = c.GetScrapeConfigs()
 		require.NoError(t, err)
 	})
+}
+
+func TestScrapeMemoryLimiterValidation(t *testing.T) {
+	cases := []struct {
+		name                         string
+		config                       ScrapeMemoryLimiterConfig
+		expectedErr                  string
+		expectedSpikeLimitMiB        uint64
+		expectedSpikeLimitPercentage uint32
+	}{
+		{
+			name:                  "Valid config with LimitMiB",
+			config:                ScrapeMemoryLimiterConfig{LimitMiB: 100},
+			expectedSpikeLimitMiB: 20,
+		},
+		{
+			name:                         "Valid config with LimitPercentage",
+			config:                       ScrapeMemoryLimiterConfig{LimitPercentage: 50},
+			expectedSpikeLimitPercentage: 10,
+		},
+		{
+			name:        "Missing both limits",
+			config:      ScrapeMemoryLimiterConfig{},
+			expectedErr: "scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set",
+		},
+		{
+			name:        "LimitPercentage > 100",
+			config:      ScrapeMemoryLimiterConfig{LimitPercentage: 101},
+			expectedErr: "scrape_memory_limiter limit_percentage cannot be greater than 100",
+		},
+		{
+			name:        "SpikeLimitPercentage > 100",
+			config:      ScrapeMemoryLimiterConfig{LimitPercentage: 50, SpikeLimitPercentage: 101},
+			expectedErr: "scrape_memory_limiter spike_limit_percentage cannot be greater than 100",
+		},
+		{
+			name:        "SpikeLimitMiB >= LimitMiB",
+			config:      ScrapeMemoryLimiterConfig{LimitMiB: 100, SpikeLimitMiB: 100},
+			expectedErr: "scrape_memory_limiter spike_limit_mib must be less than limit_mib",
+		},
+		{
+			name:        "SpikeLimitPercentage >= LimitPercentage",
+			config:      ScrapeMemoryLimiterConfig{LimitPercentage: 50, SpikeLimitPercentage: 50},
+			expectedErr: "scrape_memory_limiter spike_limit_percentage must be less than limit_percentage",
+		},
+		{
+			name:                         "Valid config with Spike limits",
+			config:                       ScrapeMemoryLimiterConfig{LimitMiB: 100, SpikeLimitMiB: 20, LimitPercentage: 50, SpikeLimitPercentage: 10},
+			expectedSpikeLimitMiB:        20,
+			expectedSpikeLimitPercentage: 10,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.config.ApplyDefaults()
+			err := c.config.Validate()
+			if c.expectedErr != "" {
+				require.EqualError(t, err, c.expectedErr)
+			} else {
+				require.NoError(t, err)
+				if c.expectedSpikeLimitMiB != 0 {
+					require.Equal(t, c.expectedSpikeLimitMiB, c.config.SpikeLimitMiB)
+				}
+				if c.expectedSpikeLimitPercentage != 0 {
+					require.Equal(t, c.expectedSpikeLimitPercentage, c.config.SpikeLimitPercentage)
+				}
+			}
+		})
+	}
 }

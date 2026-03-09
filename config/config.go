@@ -276,18 +276,28 @@ var (
 		// For backwards compatibility.
 		LabelNamePreserveMultipleUnderscores: true,
 	}
+
+	// DefaultScrapeMemoryLimiterConfig is the default scrape memory limiter configuration.
+	DefaultScrapeMemoryLimiterConfig = ScrapeMemoryLimiterConfig{
+		CheckInterval:        model.Duration(0),
+		LimitMiB:             0,
+		SpikeLimitMiB:        0, // 20% of limit_mib by default, applied later
+		LimitPercentage:      0,
+		SpikeLimitPercentage: 0, // 20% of limit_percentage by default, applied later
+	}
 )
 
 // Config is the top-level configuration for Prometheus's config files.
 type Config struct {
-	GlobalConfig      GlobalConfig    `yaml:"global"`
-	Runtime           RuntimeConfig   `yaml:"runtime,omitempty"`
-	AlertingConfig    AlertingConfig  `yaml:"alerting,omitempty"`
-	RuleFiles         []string        `yaml:"rule_files,omitempty"`
-	ScrapeConfigFiles []string        `yaml:"scrape_config_files,omitempty"`
-	ScrapeConfigs     []*ScrapeConfig `yaml:"scrape_configs,omitempty"`
-	StorageConfig     StorageConfig   `yaml:"storage,omitempty"`
-	TracingConfig     TracingConfig   `yaml:"tracing,omitempty"`
+	GlobalConfig        GlobalConfig               `yaml:"global"`
+	Runtime             RuntimeConfig              `yaml:"runtime,omitempty"`
+	AlertingConfig      AlertingConfig             `yaml:"alerting,omitempty"`
+	RuleFiles           []string                   `yaml:"rule_files,omitempty"`
+	ScrapeConfigFiles   []string                   `yaml:"scrape_config_files,omitempty"`
+	ScrapeConfigs       []*ScrapeConfig            `yaml:"scrape_configs,omitempty"`
+	ScrapeMemoryLimiter *ScrapeMemoryLimiterConfig `yaml:"scrape_memory_limiter,omitempty"`
+	StorageConfig       StorageConfig              `yaml:"storage,omitempty"`
+	TracingConfig       TracingConfig              `yaml:"tracing,omitempty"`
 
 	RemoteWriteConfigs []*RemoteWriteConfig `yaml:"remote_write,omitempty"`
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
@@ -457,6 +467,13 @@ func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 			return fmt.Errorf("found multiple remote read configs with job name %q", rrcfg.Name)
 		}
 		rrNames[rrcfg.Name] = struct{}{}
+	}
+
+	if c.ScrapeMemoryLimiter != nil {
+		c.ScrapeMemoryLimiter.ApplyDefaults()
+		if err := c.ScrapeMemoryLimiter.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1602,6 +1619,56 @@ type RemoteReadConfig struct {
 
 	// Whether to use the external labels as selectors for the remote read endpoint.
 	FilterExternalLabels bool `yaml:"filter_external_labels,omitempty"`
+}
+
+// ScrapeMemoryLimiterConfig configures the scrape memory limiter.
+type ScrapeMemoryLimiterConfig struct {
+	CheckInterval        model.Duration `yaml:"check_interval,omitempty"`
+	LimitMiB             uint64         `yaml:"limit_mib,omitempty"`
+	SpikeLimitMiB        uint64         `yaml:"spike_limit_mib,omitempty"`
+	LimitPercentage      uint32         `yaml:"limit_percentage,omitempty"`
+	SpikeLimitPercentage uint32         `yaml:"spike_limit_percentage,omitempty"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *ScrapeMemoryLimiterConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	*c = DefaultScrapeMemoryLimiterConfig
+	type plain ScrapeMemoryLimiterConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ApplyDefaults applies default values to the limiter configuration.
+func (c *ScrapeMemoryLimiterConfig) ApplyDefaults() {
+	if c.LimitMiB > 0 && c.SpikeLimitMiB == 0 {
+		c.SpikeLimitMiB = c.LimitMiB / 5
+	}
+	if c.LimitPercentage > 0 && c.SpikeLimitPercentage == 0 {
+		c.SpikeLimitPercentage = c.LimitPercentage / 5
+	}
+}
+
+// Validate checks the memory limiter configuration limits.
+func (c *ScrapeMemoryLimiterConfig) Validate() error {
+	if c.LimitMiB == 0 && c.LimitPercentage == 0 {
+		return errors.New("scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set")
+	}
+	if c.LimitPercentage > 100 {
+		return errors.New("scrape_memory_limiter limit_percentage cannot be greater than 100")
+	}
+	if c.SpikeLimitPercentage > 100 {
+		return errors.New("scrape_memory_limiter spike_limit_percentage cannot be greater than 100")
+	}
+
+	if c.SpikeLimitMiB != 0 && c.SpikeLimitMiB >= c.LimitMiB && c.LimitMiB != 0 {
+		return errors.New("scrape_memory_limiter spike_limit_mib must be less than limit_mib")
+	}
+	if c.SpikeLimitPercentage != 0 && c.SpikeLimitPercentage >= c.LimitPercentage && c.LimitPercentage != 0 {
+		return errors.New("scrape_memory_limiter spike_limit_percentage must be less than limit_percentage")
+	}
+	return nil
 }
 
 // SetDirectory joins any relative file paths with dir.
