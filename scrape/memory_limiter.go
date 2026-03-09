@@ -15,7 +15,7 @@ package scrape
 
 import (
 	"log/slog"
-	"math"
+	"math/rand"
 	"runtime"
 	"sync"
 	"time"
@@ -41,20 +41,27 @@ type scrapeMemoryLimiter struct {
 	// mu protects config and cached state.
 	mu sync.RWMutex
 
-	lastCheck   time.Time
-	isOverLimit bool
+	lastCheck       time.Time
+	allocMiB        float64
+	allocPercentage float64
+
+	maxScrapeSize    int
+	consecutiveSkips map[uint64]int
 
 	// Functions for reading memory stats, overrideable for testing.
 	readMemStats func(*runtime.MemStats)
 	totalMemory  func() uint64
+	randFloat    func() float64
 }
 
 func newScrapeMemoryLimiter(cfg *config.ScrapeMemoryLimiterConfig, logger *slog.Logger) *scrapeMemoryLimiter {
 	return &scrapeMemoryLimiter{
-		logger:       logger,
-		config:       cfg,
-		readMemStats: runtime.ReadMemStats,
-		totalMemory:  memory.TotalMemory,
+		logger:           logger,
+		config:           cfg,
+		readMemStats:     runtime.ReadMemStats,
+		totalMemory:      memory.TotalMemory,
+		randFloat:        rand.Float64,
+		consecutiveSkips: make(map[uint64]int),
 	}
 }
 
@@ -72,35 +79,85 @@ func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize in
 		return true
 	}
 
+	if l.consecutiveSkips == nil {
+		l.consecutiveSkips = make(map[uint64]int)
+	}
+
+	if lastScrapeSize > l.maxScrapeSize {
+		l.maxScrapeSize = lastScrapeSize
+	}
+
 	now := time.Now()
-	if time.Duration(l.config.CheckInterval) != 0 && now.Sub(l.lastCheck) < time.Duration(l.config.CheckInterval) {
-		return !l.isOverLimit
-	}
+	if time.Duration(l.config.CheckInterval) == 0 || now.Sub(l.lastCheck) >= time.Duration(l.config.CheckInterval) {
+		var m runtime.MemStats
+		l.readMemStats(&m)
 
-	var m runtime.MemStats
-	l.readMemStats(&m)
+		l.lastCheck = now
+		l.allocMiB = float64(m.Alloc) / 1024 / 1024
 
-	l.lastCheck = now
-	l.isOverLimit = false
-
-	if l.config.LimitMiB > 0 {
-		allocMiB := float64(m.Alloc) / 1024 / 1024
-		if allocMiB >= float64(l.config.LimitMiB) {
-			l.isOverLimit = true
-			return false
-		}
-	}
-
-	if l.config.LimitPercentage > 0 {
 		totalMem := l.totalMemory()
 		if totalMem > 0 {
-			allocPercentage := (float64(m.Alloc) / float64(totalMem)) * 100.0
-			if math.Round(allocPercentage) >= float64(l.config.LimitPercentage) {
-				l.isOverLimit = true
-				return false
-			}
+			l.allocPercentage = (float64(m.Alloc) / float64(totalMem)) * 100.0
+		} else {
+			l.allocPercentage = 0
 		}
 	}
 
+	dropReqMiB := float64(0)
+	if l.config.LimitMiB > 0 {
+		softLimit := float64(l.config.LimitMiB - l.config.SpikeLimitMiB)
+		hardLimit := float64(l.config.LimitMiB)
+		if l.allocMiB >= hardLimit {
+			dropReqMiB = 1.0
+		} else if l.allocMiB > softLimit {
+			dropReqMiB = (l.allocMiB - softLimit) / (hardLimit - softLimit)
+		}
+	}
+
+	dropReqPct := float64(0)
+	if l.config.LimitPercentage > 0 {
+		softLimit := float64(l.config.LimitPercentage - l.config.SpikeLimitPercentage)
+		hardLimit := float64(l.config.LimitPercentage)
+		if l.allocPercentage >= hardLimit {
+			dropReqPct = 1.0
+		} else if l.allocPercentage > softLimit {
+			dropReqPct = (l.allocPercentage - softLimit) / (hardLimit - softLimit)
+		}
+	}
+
+	pressure := dropReqMiB
+	if dropReqPct > pressure {
+		pressure = dropReqPct
+	}
+
+	if pressure <= 0 {
+		l.consecutiveSkips[hash] = 0
+		return true
+	}
+
+	if l.consecutiveSkips[hash] >= 5 {
+		// Starvation prevention: force scrape if skipped 5 times sequentially.
+		l.consecutiveSkips[hash] = 0
+		return true
+	}
+
+	// Fairness formula: scale the drop probability by relative size of this scrape compared to max seen.
+	// Smallest scrapes multiplied by 0.5, largest by 1.5. Cap at 1.0.
+	sizeFactor := 1.0
+	if l.maxScrapeSize > 0 {
+		sizeFactor = float64(lastScrapeSize) / float64(l.maxScrapeSize)
+	}
+
+	dropProb := pressure * (0.5 + sizeFactor)
+	if dropProb > 1.0 {
+		dropProb = 1.0
+	}
+
+	if dropProb == 1.0 || l.randFloat() < dropProb {
+		l.consecutiveSkips[hash]++
+		return false
+	}
+
+	l.consecutiveSkips[hash] = 0
 	return true
 }

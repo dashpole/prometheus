@@ -123,3 +123,46 @@ func TestMemoryLimiter_TargetScrapeAllowed(t *testing.T) {
 		})
 	}
 }
+
+func TestMemoryLimiter_Fairness(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		l := newScrapeMemoryLimiter(&config.ScrapeMemoryLimiterConfig{
+			LimitMiB:      100,
+			SpikeLimitMiB: 20, // soft limit is 80
+		}, logger)
+
+		// Hardcode random to always return 0.5 for predictable probability testing.
+		l.randFloat = func() float64 { return 0.5 }
+
+		// Memory is at 90 MiB (50% pressure: (90 - 80) / (100 - 80) = 10 / 20 = 0.5)
+		l.readMemStats = func(m *runtime.MemStats) {
+			m.Alloc = 90 * 1024 * 1024
+		}
+		l.totalMemory = func() uint64 { return 1000 * 1024 * 1024 }
+
+		// Establish maxScrapeSize. Since pressure is 0.5, sizeFactor is 1.0 (it's the max),
+		// dropProb = 0.5 * 1.5 = 0.75, which is > 0.5 so it will be dropped!
+		// Wait, if we want it to be accepted, we should just manually set maxScrapeSize.
+		// Or we can let it be dropped, it sets maxScrapeSize anyway.
+		allowed := l.TargetScrapeAllowed(1, 1000)
+		require.False(t, allowed)
+		require.Equal(t, 1000, l.maxScrapeSize)
+
+		// Target 2 is large (1000). sizeFactor = 1.0. dropProb = 0.5 * (0.5 + 1.0) = 0.75.
+		// Since 0.5 < 0.75, it should be dropped.
+		require.False(t, l.TargetScrapeAllowed(2, 1000))
+
+		// Target 3 is small (10). sizeFactor = 0.01. dropProb = 0.5 * (0.5 + 0.01) = 0.255.
+		// Since 0.5 < 0.255 is false, it should be allowed.
+		require.True(t, l.TargetScrapeAllowed(3, 10))
+
+		// Test starvation prevention on Target 2 (large)
+		// It has been skipped 1 time already.
+		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 2 skips
+		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 3 skips
+		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 4 skips
+		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 5 skips
+		require.True(t, l.TargetScrapeAllowed(2, 1000))  // 6th time is forced allowed!
+	})
+}
