@@ -42,6 +42,7 @@ type scrapeMetrics struct {
 
 	// Used by targetScraper.
 	targetScrapeExceededBodySizeLimit prometheus.Counter
+	targetScrapeExceededMemoryLimit   prometheus.Counter
 
 	// Used by scrapeCache.
 	targetScrapeCacheFlushForced prometheus.Counter
@@ -182,6 +183,12 @@ func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
 			Help: "Total number of scrapes that hit the body size limit",
 		},
 	)
+	sm.targetScrapeExceededMemoryLimit = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "prometheus_target_scrapes_exceeded_memory_limit_total",
+			Help: "Total number of scrapes that hit the memory limit and were rejected.",
+		},
+	)
 
 	// Used by scrapeCache.
 	sm.targetScrapeCacheFlushForced = prometheus.NewCounter(
@@ -282,6 +289,7 @@ func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
 		sm.targetSyncFailed,
 		// Used by targetScraper.
 		sm.targetScrapeExceededBodySizeLimit,
+		sm.targetScrapeExceededMemoryLimit,
 		// Used by scrapeCache.
 		sm.targetScrapeCacheFlushForced,
 		// Used by scrapeLoop.
@@ -325,6 +333,7 @@ func (sm *scrapeMetrics) Unregister() {
 	sm.reg.Unregister(sm.targetScrapePoolSymbolTableItems)
 	sm.reg.Unregister(sm.targetSyncFailed)
 	sm.reg.Unregister(sm.targetScrapeExceededBodySizeLimit)
+	sm.reg.Unregister(sm.targetScrapeExceededMemoryLimit)
 	sm.reg.Unregister(sm.targetScrapeCacheFlushForced)
 	sm.reg.Unregister(sm.targetIntervalLength)
 	sm.reg.Unregister(sm.targetIntervalLengthHistogram)

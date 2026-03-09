@@ -1920,6 +1920,8 @@ func testScrapeLoopScrapeAndReportMemoryLimitExceeded(t *testing.T, appV2 bool) 
 	err := <-errc
 	require.ErrorIs(t, err, errScrapeMemoryLimitExceeded)
 
+	require.Equal(t, 1.0, prom_testutil.ToFloat64(sl.metrics.targetScrapeExceededMemoryLimit), "metric should be incremented")
+
 	resultSamples := appTest.ResultSamples()
 	var upSample *sample
 	for _, s := range resultSamples {
