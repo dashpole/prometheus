@@ -276,18 +276,26 @@ var (
 		// For backwards compatibility.
 		LabelNamePreserveMultipleUnderscores: true,
 	}
+
+	// DefaultScrapeMemoryLimiterConfig is the default scrape memory limiter configuration.
+	DefaultScrapeMemoryLimiterConfig = ScrapeMemoryLimiterConfig{
+		CheckInterval:   model.Duration(0),
+		LimitMiB:        0,
+		LimitPercentage: 0,
+	}
 )
 
 // Config is the top-level configuration for Prometheus's config files.
 type Config struct {
-	GlobalConfig      GlobalConfig    `yaml:"global"`
-	Runtime           RuntimeConfig   `yaml:"runtime,omitempty"`
-	AlertingConfig    AlertingConfig  `yaml:"alerting,omitempty"`
-	RuleFiles         []string        `yaml:"rule_files,omitempty"`
-	ScrapeConfigFiles []string        `yaml:"scrape_config_files,omitempty"`
-	ScrapeConfigs     []*ScrapeConfig `yaml:"scrape_configs,omitempty"`
-	StorageConfig     StorageConfig   `yaml:"storage,omitempty"`
-	TracingConfig     TracingConfig   `yaml:"tracing,omitempty"`
+	GlobalConfig        GlobalConfig               `yaml:"global"`
+	Runtime             RuntimeConfig              `yaml:"runtime,omitempty"`
+	AlertingConfig      AlertingConfig             `yaml:"alerting,omitempty"`
+	RuleFiles           []string                   `yaml:"rule_files,omitempty"`
+	ScrapeConfigFiles   []string                   `yaml:"scrape_config_files,omitempty"`
+	ScrapeConfigs       []*ScrapeConfig            `yaml:"scrape_configs,omitempty"`
+	ScrapeMemoryLimiter *ScrapeMemoryLimiterConfig `yaml:"scrape_memory_limiter,omitempty"`
+	StorageConfig       StorageConfig              `yaml:"storage,omitempty"`
+	TracingConfig       TracingConfig              `yaml:"tracing,omitempty"`
 
 	RemoteWriteConfigs []*RemoteWriteConfig `yaml:"remote_write,omitempty"`
 	RemoteReadConfigs  []*RemoteReadConfig  `yaml:"remote_read,omitempty"`
@@ -457,6 +465,12 @@ func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 			return fmt.Errorf("found multiple remote read configs with job name %q", rrcfg.Name)
 		}
 		rrNames[rrcfg.Name] = struct{}{}
+	}
+
+	if c.ScrapeMemoryLimiter != nil {
+		if err := c.ScrapeMemoryLimiter.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1602,6 +1616,34 @@ type RemoteReadConfig struct {
 
 	// Whether to use the external labels as selectors for the remote read endpoint.
 	FilterExternalLabels bool `yaml:"filter_external_labels,omitempty"`
+}
+
+// ScrapeMemoryLimiterConfig configures the scrape memory limiter.
+type ScrapeMemoryLimiterConfig struct {
+	CheckInterval   model.Duration `yaml:"check_interval,omitempty"`
+	LimitMiB        uint64         `yaml:"limit_mib,omitempty"`
+	LimitPercentage uint32         `yaml:"limit_percentage,omitempty"`
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *ScrapeMemoryLimiterConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	*c = DefaultScrapeMemoryLimiterConfig
+	type plain ScrapeMemoryLimiterConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Validate checks the memory limiter configuration limits.
+func (c *ScrapeMemoryLimiterConfig) Validate() error {
+	if c.LimitMiB == 0 && c.LimitPercentage == 0 {
+		return errors.New("scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set")
+	}
+	if c.LimitPercentage > 100 {
+		return errors.New("scrape_memory_limiter limit_percentage cannot be greater than 100")
+	}
+	return nil
 }
 
 // SetDirectory joins any relative file paths with dir.

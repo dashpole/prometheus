@@ -178,6 +178,12 @@ var expectedConf = &Config{
 		LabelNamePreserveMultipleUnderscores: true,
 	},
 
+	ScrapeMemoryLimiter: &ScrapeMemoryLimiterConfig{
+		CheckInterval:   model.Duration(10 * time.Second),
+		LimitMiB:        100,
+		LimitPercentage: 0,
+	},
+
 	RemoteReadConfigs: []*RemoteReadConfig{
 		{
 			URL:              mustParseURL("http://remote1/read"),
@@ -2626,6 +2632,14 @@ var expectedErrors = []struct {
 		filename: "stackit_endpoint.bad.yml",
 		errMsg:   "invalid endpoint",
 	},
+	{
+		filename: "scrape_memory_limiter_empty.bad.yml",
+		errMsg:   "scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set",
+	},
+	{
+		filename: "scrape_memory_limiter_limit_percentage.bad.yml",
+		errMsg:   "scrape_memory_limiter limit_percentage cannot be greater than 100",
+	},
 }
 
 func TestBadConfigs(t *testing.T) {
@@ -3376,4 +3390,41 @@ func TestGetScrapeConfigs_Loaded(t *testing.T) {
 		_, err = c.GetScrapeConfigs()
 		require.NoError(t, err)
 	})
+}
+
+func TestScrapeMemoryLimiterValidation(t *testing.T) {
+	cases := []struct {
+		name        string
+		config      ScrapeMemoryLimiterConfig
+		expectedErr string
+	}{
+		{
+			name:   "Valid config with LimitMiB",
+			config: ScrapeMemoryLimiterConfig{LimitMiB: 100},
+		},
+		{
+			name:   "Valid config with LimitPercentage",
+			config: ScrapeMemoryLimiterConfig{LimitPercentage: 50},
+		},
+		{
+			name:        "Missing both limits",
+			config:      ScrapeMemoryLimiterConfig{},
+			expectedErr: "scrape_memory_limiter requires at least one of limit_mib or limit_percentage to be set",
+		},
+		{
+			name:        "LimitPercentage > 100",
+			config:      ScrapeMemoryLimiterConfig{LimitPercentage: 101},
+			expectedErr: "scrape_memory_limiter limit_percentage cannot be greater than 100",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.config.Validate()
+			if c.expectedErr != "" {
+				require.EqualError(t, err, c.expectedErr)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
