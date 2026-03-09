@@ -126,6 +126,10 @@ type Options struct {
 	// FeatureRegistry is the registry for tracking enabled/disabled features.
 	FeatureRegistry features.Collector
 
+	// MemoryLimiter is the optional subsystem that dictates whether scrapes are permitted
+	// based on memory constraints.
+	MemoryLimiter MemoryLimiter
+
 	// private option for testability.
 	skipOffsetting bool
 }

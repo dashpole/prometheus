@@ -1882,6 +1882,57 @@ func testScrapeLoopScrapeAndReport(t *testing.T, appV2 bool) {
 	require.Len(t, appTest.ResultMetadata(), 1862)
 }
 
+type mockMemoryLimiter struct {
+	allowed bool
+}
+
+func (m *mockMemoryLimiter) TargetScrapeAllowed() bool {
+	return m.allowed
+}
+
+func TestScrapeLoopScrapeAndReportMemoryLimitExceeded(t *testing.T) {
+	foreachAppendable(t, func(t *testing.T, appV2 bool) {
+		testScrapeLoopScrapeAndReportMemoryLimitExceeded(t, appV2)
+	})
+}
+
+func testScrapeLoopScrapeAndReportMemoryLimitExceeded(t *testing.T, appV2 bool) {
+	appTest := teststorage.NewAppendable()
+	sl, scraper := newTestScrapeLoop(t, withAppendable(appTest, appV2), func(sl *scrapeLoop) {
+		sl.memoryLimiter = &mockMemoryLimiter{allowed: false}
+	})
+
+	scraped := false
+	scraper.scrapeFunc = func(_ context.Context, writer io.Writer) error {
+		scraped = true
+		_, err := writer.Write([]byte("metric_a 42\n"))
+		return err
+	}
+
+	ts := time.Time{}
+	errc := make(chan error, 1)
+
+	sl.scrapeAndReport(time.Time{}, ts, errc)
+
+	require.False(t, scraped, "scraper.scrape should not be called when memory limit is exceeded")
+	require.ErrorIs(t, scraper.lastError, errScrapeMemoryLimitExceeded)
+
+	err := <-errc
+	require.ErrorIs(t, err, errScrapeMemoryLimitExceeded)
+
+	resultSamples := appTest.ResultSamples()
+	var upSample *sample
+	for _, s := range resultSamples {
+		if s.L.Get(model.MetricNameLabel) == "up" {
+			sCopy := s
+			upSample = &sCopy
+			break
+		}
+	}
+	require.NotNil(t, upSample)
+	require.Equal(t, 0.0, upSample.V, "up metric should be 0 because scrape failed")
+}
+
 // Recommended CLI invocation:
 /*
 	export bench=scrapeAndReport && go test ./scrape/... \
