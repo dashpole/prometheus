@@ -15,7 +15,12 @@ package scrape
 
 import (
 	"log/slog"
+	"math"
+	"runtime"
 	"sync"
+	"time"
+
+	"github.com/pbnjay/memory"
 
 	"github.com/prometheus/prometheus/config"
 )
@@ -33,14 +38,23 @@ type scrapeMemoryLimiter struct {
 	logger *slog.Logger
 	config *config.ScrapeMemoryLimiterConfig
 
-	// mu protects config updates.
+	// mu protects config and cached state.
 	mu sync.RWMutex
+
+	lastCheck   time.Time
+	isOverLimit bool
+
+	// Functions for reading memory stats, overrideable for testing.
+	readMemStats func(*runtime.MemStats)
+	totalMemory  func() uint64
 }
 
 func newScrapeMemoryLimiter(cfg *config.ScrapeMemoryLimiterConfig, logger *slog.Logger) *scrapeMemoryLimiter {
 	return &scrapeMemoryLimiter{
-		logger: logger,
-		config: cfg,
+		logger:       logger,
+		config:       cfg,
+		readMemStats: runtime.ReadMemStats,
+		totalMemory:  memory.TotalMemory,
 	}
 }
 
@@ -51,7 +65,42 @@ func (l *scrapeMemoryLimiter) ApplyConfig(cfg *config.ScrapeMemoryLimiterConfig)
 }
 
 func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize int) bool {
-	// TODO: For now this is a no-op that always allows scrapes.
-	// The tracking features will be implemented later.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.config == nil {
+		return true
+	}
+
+	now := time.Now()
+	if time.Duration(l.config.CheckInterval) != 0 && now.Sub(l.lastCheck) < time.Duration(l.config.CheckInterval) {
+		return !l.isOverLimit
+	}
+
+	var m runtime.MemStats
+	l.readMemStats(&m)
+
+	l.lastCheck = now
+	l.isOverLimit = false
+
+	if l.config.LimitMiB > 0 {
+		allocMiB := float64(m.Alloc) / 1024 / 1024
+		if allocMiB >= float64(l.config.LimitMiB) {
+			l.isOverLimit = true
+			return false
+		}
+	}
+
+	if l.config.LimitPercentage > 0 {
+		totalMem := l.totalMemory()
+		if totalMem > 0 {
+			allocPercentage := (float64(m.Alloc) / float64(totalMem)) * 100.0
+			if math.Round(allocPercentage) >= float64(l.config.LimitPercentage) {
+				l.isOverLimit = true
+				return false
+			}
+		}
+	}
+
 	return true
 }
