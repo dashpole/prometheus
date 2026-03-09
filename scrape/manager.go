@@ -293,6 +293,21 @@ func (m *Manager) ApplyConfig(cfg *config.Config) error {
 	scrapeFailureLoggers := map[string]FailureLogger{
 		"": nil, // Emptying the file name sets the scrape logger to nil.
 	}
+
+	if cfg.ScrapeMemoryLimiter != nil {
+		featureEnabled := false
+		if m.opts.FeatureRegistry != nil {
+			if m.opts.FeatureRegistry.Get()[features.Scrape]["memory_limiter"] {
+				featureEnabled = true
+			}
+		}
+		if !featureEnabled {
+			m.logger.Warn("scrape memory limiter configuration is present but the scrape-memory-limiter feature flag is not enabled. Run Prometheus with `--enable-feature=scrape-memory-limiter` to use this feature.")
+		} else {
+			// TODO: Initialize/Update the MemoryLimiter using cfg.ScrapeMemoryLimiter
+		}
+	}
+
 	for _, scfg := range scfgs {
 		c[scfg.JobName] = scfg
 		if _, ok := scrapeFailureLoggers[scfg.ScrapeFailureLogFile]; !ok {
