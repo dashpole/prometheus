@@ -126,8 +126,8 @@ type Options struct {
 	// FeatureRegistry is the registry for tracking enabled/disabled features.
 	FeatureRegistry features.Collector
 
-	// MemoryLimiter is the optional subsystem that dictates whether scrapes are permitted
-	// based on memory constraints.
+	// MemoryLimiter is a component that dictates if a target scrape should be aborted
+	// due to the Prometheus server exceeding a memory threshold.
 	MemoryLimiter MemoryLimiter
 
 	// private option for testability.
@@ -303,9 +303,17 @@ func (m *Manager) ApplyConfig(cfg *config.Config) error {
 		}
 		if !featureEnabled {
 			m.logger.Warn("scrape memory limiter configuration is present but the scrape-memory-limiter feature flag is not enabled. Run Prometheus with `--enable-feature=scrape-memory-limiter` to use this feature.")
+			m.opts.MemoryLimiter = nil
 		} else {
-			// TODO: Initialize/Update the MemoryLimiter using cfg.ScrapeMemoryLimiter
+			// Initialize/Update the MemoryLimiter using cfg.ScrapeMemoryLimiter
+			if m.opts.MemoryLimiter == nil {
+				m.opts.MemoryLimiter = newScrapeMemoryLimiter(cfg.ScrapeMemoryLimiter, m.logger)
+			} else if limiter, ok := m.opts.MemoryLimiter.(*scrapeMemoryLimiter); ok {
+				limiter.ApplyConfig(cfg.ScrapeMemoryLimiter)
+			}
 		}
+	} else {
+		m.opts.MemoryLimiter = nil
 	}
 
 	for _, scfg := range scfgs {

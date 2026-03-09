@@ -82,14 +82,6 @@ type FailureLogger interface {
 	io.Closer
 }
 
-// MemoryLimiter is responsible for tracking memory usage and dictating whether
-// scrapes should be aborted due to high memory pressure.
-type MemoryLimiter interface {
-	// TargetScrapeAllowed returns true if a scrape for the given target hash and
-	// estimated size is permitted.
-	TargetScrapeAllowed(hash uint64, lastScrapeSize int) bool
-}
-
 // scrapePool manages scrapes for sets of targets.
 type scrapePool struct {
 	appendable   storage.Appendable

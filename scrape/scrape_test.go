@@ -1915,7 +1915,7 @@ func testScrapeLoopScrapeAndReportMemoryLimitExceeded(t *testing.T, appV2 bool) 
 	sl.scrapeAndReport(time.Time{}, ts, errc)
 
 	require.False(t, scraped, "scraper.scrape should not be called when memory limit is exceeded")
-	require.NoError(t, scraper.lastError)
+	require.ErrorIs(t, scraper.lastError, errScrapeMemoryLimitExceeded)
 
 	err := <-errc
 	require.ErrorIs(t, err, errScrapeMemoryLimitExceeded)
