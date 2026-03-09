@@ -71,6 +71,8 @@ var AlignScrapeTimestamps = true
 
 var errNameLabelMandatory = fmt.Errorf("missing metric name (%s label)", model.MetricNameLabel)
 
+var errScrapeMemoryLimitExceeded = errors.New("scrape memory limit exceeded")
+
 var _ FailureLogger = (*logging.JSONFileLogger)(nil)
 
 // FailureLogger is an interface that can be used to log all failed
@@ -78,6 +80,14 @@ var _ FailureLogger = (*logging.JSONFileLogger)(nil)
 type FailureLogger interface {
 	slog.Handler
 	io.Closer
+}
+
+// MemoryLimiter is responsible for tracking memory usage and dictating whether
+// scrapes should be aborted due to high memory pressure.
+type MemoryLimiter interface {
+	// TargetScrapeAllowed returns true if a scrape for the given target hash and
+	// estimated size is permitted.
+	TargetScrapeAllowed(hash uint64, lastScrapeSize int) bool
 }
 
 // scrapePool manages scrapes for sets of targets.
@@ -98,6 +108,8 @@ type scrapePool struct {
 	symbolTable           *labels.SymbolTable
 	lastSymbolTableCheck  time.Time
 	initialSymbolTableLen int
+
+	memoryLimiter MemoryLimiter
 
 	targetMtx sync.Mutex
 	// activeTargets and loops must always be synchronized to have the same
@@ -181,6 +193,7 @@ func newScrapePool(
 		loops:                map[uint64]loop{},
 		symbolTable:          symbols,
 		lastSymbolTableCheck: time.Now(),
+		memoryLimiter:        options.MemoryLimiter,
 		activeTargets:        map[uint64]*Target{},
 		metrics:              metrics,
 		buffers:              buffers,
@@ -859,6 +872,8 @@ type scrapeLoop struct {
 	mrc                           []*relabel.Config
 	validationScheme              model.ValidationScheme
 
+	memoryLimiter MemoryLimiter
+	hash          uint64
 	// Options from scrape.Options.
 	enableSTZeroIngestion   bool
 	enableTypeAndUnitLabels bool
@@ -1184,6 +1199,8 @@ func newScrapeLoop(opts scrapeLoopOptions) *scrapeLoop {
 		reportSampleMutator: func(l labels.Labels) labels.Labels { return mutateReportSampleLabels(l, opts.target) },
 		scraper:             opts.scraper,
 
+		hash: opts.target.hash(),
+
 		// Static params per scrapePool.
 		appendable:   opts.sp.appendable,
 		appendableV2: opts.sp.appendableV2,
@@ -1219,6 +1236,8 @@ func newScrapeLoop(opts scrapeLoopOptions) *scrapeLoop {
 		appendMetadataToWAL:     opts.sp.options.AppendMetadata,
 		passMetadataInContext:   opts.sp.options.PassMetadataInContext,
 		skipOffsetting:          opts.sp.options.skipOffsetting,
+
+		memoryLimiter: opts.sp.memoryLimiter,
 	}
 }
 
@@ -1371,6 +1390,19 @@ func (sl *scrapeLoop) scrapeAndReport(last, appendTime time.Time, errc chan<- er
 	var resp *http.Response
 	var b []byte
 	var buf *bytes.Buffer
+
+	// Check if the scrape is allowed under current memory pressure.
+	if sl.memoryLimiter != nil && !sl.memoryLimiter.TargetScrapeAllowed(sl.hash, sl.lastScrapeSize) {
+		scrapeErr = errScrapeMemoryLimitExceeded
+		if errc != nil {
+			select {
+			case errc <- scrapeErr:
+			case <-sl.ctx.Done():
+			}
+		}
+		return start
+	}
+
 	scrapeCtx, cancel := context.WithTimeout(sl.parentCtx, sl.timeout)
 	resp, scrapeErr = sl.scraper.scrape(scrapeCtx)
 	if scrapeErr == nil {
