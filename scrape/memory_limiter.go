@@ -46,8 +46,9 @@ type scrapeMemoryLimiter struct {
 	allocMiB        float64
 	allocPercentage float64
 
-	lastTokenUpdate time.Time
-	tokens          float64
+	tokenBucket   *tokenBucketStrategy
+	drr           *drrStrategy
+	probabilistic *probabilisticStrategy
 
 	maxScrapeSize    int
 	consecutiveSkips map[uint64]int
@@ -66,6 +67,12 @@ func newScrapeMemoryLimiter(cfg *config.ScrapeMemoryLimiterConfig, logger *slog.
 		totalMemory:      memory.TotalMemory,
 		randFloat:        rand.Float64,
 		consecutiveSkips: make(map[uint64]int),
+		tokenBucket:      &tokenBucketStrategy{},
+		drr: &drrStrategy{
+			targetLastQuantum: make(map[uint64]float64),
+			targetDeficit:     make(map[uint64]float64),
+		},
+		probabilistic: &probabilisticStrategy{},
 	}
 }
 
@@ -145,65 +152,152 @@ func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize in
 	}
 
 	if strategy == "token_bucket" {
-		// Initialize maxTokens to 10% of limits as a reasonable bucket size
-		maxTokens := float64(50 * 1024 * 1024)
-		if l.config.LimitMiB > 0 {
-			maxTokens = float64(l.config.LimitMiB) * 1024 * 102.4 // 10% of MiB limit
+		return l.tokenBucket.targetScrapeAllowed(hash, pressure, lastScrapeSize, now, l.config, l.consecutiveSkips)
+	}
+
+	if strategy == "deficit_round_robin" {
+		return l.drr.targetScrapeAllowed(hash, pressure, lastScrapeSize, now, l.config, l.consecutiveSkips)
+	}
+
+	return l.probabilistic.targetScrapeAllowed(hash, pressure, lastScrapeSize, l.maxScrapeSize, l.randFloat, l.consecutiveSkips)
+}
+
+// tokenBucketStrategy implements Strategy B: Token Bucket (Cost-Based)
+type tokenBucketStrategy struct {
+	lastTokenUpdate time.Time
+	tokens          float64
+}
+
+func (s *tokenBucketStrategy) targetScrapeAllowed(hash uint64, pressure float64, lastScrapeSize int, now time.Time, config *config.ScrapeMemoryLimiterConfig, consecutiveSkips map[uint64]int) bool {
+	// Initialize maxTokens to 10% of limits as a reasonable bucket size
+	maxTokens := float64(50 * 1024 * 1024)
+	if config.LimitMiB > 0 {
+		maxTokens = float64(config.LimitMiB) * 1024 * 102.4 // 10% of MiB limit
+	}
+
+	if s.lastTokenUpdate.IsZero() {
+		s.lastTokenUpdate = now
+		s.tokens = maxTokens
+	}
+
+	elapsed := now.Sub(s.lastTokenUpdate).Seconds()
+	if elapsed > 0 {
+		rate := maxTokens * (1.0 - pressure)
+		s.tokens += rate * elapsed
+		if s.tokens > maxTokens {
+			s.tokens = maxTokens
+		}
+		s.lastTokenUpdate = now
+	}
+
+	cost := float64(lastScrapeSize)
+	if cost == 0 {
+		cost = 1000 // default minimum cost
+	}
+
+	// IOU logic: If we have consecutive skips, we discount the cost by 50% per skip to effectively queue large targets
+	discount := float64(1.0)
+	if skips, ok := consecutiveSkips[hash]; ok {
+		discount = math.Pow(0.5, float64(skips))
+	}
+	cost = cost * discount
+
+	if pressure == 1.0 {
+		consecutiveSkips[hash]++
+		return false // Must drop to prevent OOM
+	}
+
+	if s.tokens >= cost {
+		s.tokens -= cost
+		consecutiveSkips[hash] = 0
+		return true
+	}
+
+	consecutiveSkips[hash]++
+	return false
+}
+
+// drrStrategy implements Strategy C: Deficit Round Robin
+type drrStrategy struct {
+	globalQuantum     float64
+	lastUpdate        time.Time
+	targetLastQuantum map[uint64]float64
+	targetDeficit     map[uint64]float64
+}
+
+func (s *drrStrategy) targetScrapeAllowed(hash uint64, pressure float64, lastScrapeSize int, now time.Time, config *config.ScrapeMemoryLimiterConfig, consecutiveSkips map[uint64]int) bool {
+	if s.lastUpdate.IsZero() {
+		s.lastUpdate = now
+	}
+
+	elapsed := now.Sub(s.lastUpdate).Seconds()
+	if elapsed > 0 {
+		totalAllowedRate := float64(50 * 1024 * 1024)
+		if config.LimitMiB > 0 {
+			totalAllowedRate = float64(config.LimitMiB) * 1024 * 102.4 // 10% of limit
 		}
 
-		if l.lastTokenUpdate.IsZero() {
-			l.lastTokenUpdate = now
-			l.tokens = maxTokens
+		activeTargets := float64(len(s.targetDeficit))
+		if activeTargets == 0 {
+			activeTargets = 1.0
 		}
 
-		elapsed := now.Sub(l.lastTokenUpdate).Seconds()
-		if elapsed > 0 {
-			rate := maxTokens * (1.0 - pressure)
-			l.tokens += rate * elapsed
-			if l.tokens > maxTokens {
-				l.tokens = maxTokens
-			}
-			l.lastTokenUpdate = now
-		}
+		perTargetRate := (totalAllowedRate * (1.0 - pressure)) / activeTargets
 
-		cost := float64(lastScrapeSize)
-		if cost == 0 {
-			cost = 1000 // default minimum cost
-		}
+		s.globalQuantum += perTargetRate * elapsed
+		s.lastUpdate = now
+	}
 
-		// IOU logic: If we have consecutive skips, we discount the cost by 50% per skip to effectively queue large targets
-		discount := float64(1.0)
-		if skips, ok := l.consecutiveSkips[hash]; ok {
-			discount = math.Pow(0.5, float64(skips))
-		}
-		cost = cost * discount
+	if _, ok := s.targetLastQuantum[hash]; !ok {
+		s.targetLastQuantum[hash] = s.globalQuantum
+	}
 
-		if pressure == 1.0 {
-			l.consecutiveSkips[hash]++
-			return false // Must drop to prevent OOM
-		}
+	earnedQuantum := s.globalQuantum - s.targetLastQuantum[hash]
+	s.targetLastQuantum[hash] = s.globalQuantum
+	s.targetDeficit[hash] += earnedQuantum
 
-		if l.tokens >= cost {
-			l.tokens -= cost
-			l.consecutiveSkips[hash] = 0
-			return true
-		}
+	maxDeficit := float64(100 * 1024 * 1024) // 100MiB
+	if config.LimitMiB > 0 {
+		maxDeficit = float64(config.LimitMiB) * 1024 * 1024
+	}
+	if s.targetDeficit[hash] > maxDeficit {
+		s.targetDeficit[hash] = maxDeficit
+	}
 
-		l.consecutiveSkips[hash]++
+	cost := float64(lastScrapeSize)
+	if cost == 0 {
+		cost = 1000
+	}
+
+	if pressure >= 1.0 {
+		consecutiveSkips[hash]++
 		return false
 	}
 
-	// Strategy: Probabilistic (Default)
+	if s.targetDeficit[hash] >= cost {
+		s.targetDeficit[hash] -= cost
+		consecutiveSkips[hash] = 0
+		return true
+	}
+
+	consecutiveSkips[hash]++
+	return false
+}
+
+// probabilisticStrategy implements Strategy A: Probabilistic
+type probabilisticStrategy struct{}
+
+func (s *probabilisticStrategy) targetScrapeAllowed(hash uint64, pressure float64, lastScrapeSize, maxScrapeSize int, randFloat func() float64, consecutiveSkips map[uint64]int) bool {
 	// Fairness formula: scale the drop probability by relative size of this scrape compared to max seen.
 	// Smallest scrapes multiplied by 0.5, largest by 1.5. Cap at 1.0.
 	sizeFactor := 1.0
-	if l.maxScrapeSize > 0 {
-		sizeFactor = float64(lastScrapeSize) / float64(l.maxScrapeSize)
+	if maxScrapeSize > 0 {
+		sizeFactor = float64(lastScrapeSize) / float64(maxScrapeSize)
 	}
 
 	// Exponential decay of drop probability based on starvation (consecutive skips)
 	priorityMultiplier := 1.0
-	if skips, ok := l.consecutiveSkips[hash]; ok {
+	if skips, ok := consecutiveSkips[hash]; ok {
 		priorityMultiplier = math.Pow(0.5, float64(skips))
 	}
 
@@ -214,11 +308,11 @@ func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize in
 		dropProb = 1.0
 	}
 
-	if dropProb == 1.0 || l.randFloat() < dropProb {
-		l.consecutiveSkips[hash]++
+	if dropProb == 1.0 || randFloat() < dropProb {
+		consecutiveSkips[hash]++
 		return false
 	}
 
-	l.consecutiveSkips[hash] = 0
+	consecutiveSkips[hash] = 0
 	return true
 }

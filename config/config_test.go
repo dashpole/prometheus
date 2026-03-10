@@ -3457,14 +3457,14 @@ func TestScrapeMemoryLimiterValidation(t *testing.T) {
 			expectedSpikeLimitPercentage: 10,
 		},
 		{
-			name:             "Valid strategy token_bucket",
-			config:           ScrapeMemoryLimiterConfig{LimitMiB: 100, Strategy: "token_bucket"},
-			expectedStrategy: "token_bucket",
+			name:             "Valid strategy deficit_round_robin",
+			config:           ScrapeMemoryLimiterConfig{LimitMiB: 100, Strategy: "deficit_round_robin"},
+			expectedStrategy: "deficit_round_robin",
 		},
 		{
 			name:        "Invalid strategy",
 			config:      ScrapeMemoryLimiterConfig{LimitMiB: 100, Strategy: "unsupported_strategy"},
-			expectedErr: "scrape_memory_limiter strategy must be either 'probabilistic' or 'token_bucket'",
+			expectedErr: "scrape_memory_limiter strategy must be either 'probabilistic', 'token_bucket', or 'deficit_round_robin'",
 		},
 	}
 	for _, c := range cases {

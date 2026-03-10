@@ -199,3 +199,46 @@ func TestMemoryLimiter_StrategyTokenBucket(t *testing.T) {
 		require.True(t, l.TargetScrapeAllowed(1, 30_000_000))
 	})
 }
+
+func TestMemoryLimiter_StrategyDRR(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		l := newScrapeMemoryLimiter(&config.ScrapeMemoryLimiterConfig{
+			LimitMiB:      100,
+			SpikeLimitMiB: 20, // soft limit is 80
+			Strategy:      "deficit_round_robin",
+		}, logger)
+
+		// Memory is at 90 MiB (50% pressure)
+		l.readMemStats = func(m *runtime.MemStats) {
+			m.Alloc = 90 * 1024 * 1024
+		}
+
+		// Initial TargetScrapeAllowed registers the target and sets its last quantum map to 0.
+		// Next elapsed time will generate quantum.
+		// Limit 100MiB means total rate is 10MiB/s. With 50% pressure, actual generation is 5MiB/s.
+		// We have 1 active target, so it gets the full 5MiB/s rate.
+
+		// Attempt to scrape 6 MiB immediately. Deficit is 0, so it drops.
+		require.False(t, l.TargetScrapeAllowed(1, 6_000_000))
+
+		// Wait 1 second. Target 1 should earn ~5 MiB.
+		// 5 MiB is less than 6 MiB, so it should still drop.
+		time.Sleep(1 * time.Second)
+		require.False(t, l.TargetScrapeAllowed(1, 6_000_000))
+
+		// Target 2 comes along, wants 1 MiB. It has 0 deficit, so it drops immediately, but is now registered.
+		require.False(t, l.TargetScrapeAllowed(2, 1_000_000))
+
+		// Wait 1 second (total 2s). Total active targets is now 2. Rate splits to 2.5 MiB/s each.
+		// Target 1 was at 5 MiB. Now earns 2.5 MiB more -> 7.5 MiB.
+		// Target 2 was at 0 MiB. Now earns 2.5 MiB -> 2.5 MiB.
+		time.Sleep(1 * time.Second)
+
+		// Target 1: needs 6 MiB. Has 7.5 MiB. Succeeds! Deficit becomes 1.5 MiB.
+		require.True(t, l.TargetScrapeAllowed(1, 6_000_000))
+
+		// Target 2: needs 1 MiB. Has 2.5 MiB. Succeeds! Deficit becomes 1.5 MiB.
+		require.True(t, l.TargetScrapeAllowed(2, 1_000_000))
+	})
+}

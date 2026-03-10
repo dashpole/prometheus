@@ -1673,8 +1673,8 @@ func (c *ScrapeMemoryLimiterConfig) Validate() error {
 	if c.SpikeLimitPercentage != 0 && c.SpikeLimitPercentage >= c.LimitPercentage && c.LimitPercentage != 0 {
 		return errors.New("scrape_memory_limiter spike_limit_percentage must be less than limit_percentage")
 	}
-	if c.Strategy != "probabilistic" && c.Strategy != "token_bucket" {
-		return errors.New("scrape_memory_limiter strategy must be either 'probabilistic' or 'token_bucket'")
+	if c.Strategy != "probabilistic" && c.Strategy != "token_bucket" && c.Strategy != "deficit_round_robin" {
+		return errors.New("scrape_memory_limiter strategy must be either 'probabilistic', 'token_bucket', or 'deficit_round_robin'")
 	}
 	return nil
 }
