@@ -1382,6 +1382,7 @@ func (sl *scrapeLoop) scrapeAndReport(last, appendTime time.Time, errc chan<- er
 
 	// Check if the scrape is allowed under current memory pressure.
 	if sl.memoryLimiter != nil && !sl.memoryLimiter.TargetScrapeAllowed() {
+		sl.metrics.targetScrapeExceededMemoryLimit.Inc()
 		scrapeErr = errScrapeMemoryLimitExceeded
 		if errc != nil {
 			select {
