@@ -3413,6 +3413,7 @@ func TestScrapeMemoryLimiterValidation(t *testing.T) {
 		expectedErr                  string
 		expectedSpikeLimitMiB        uint64
 		expectedSpikeLimitPercentage uint32
+		expectedStrategy             string
 	}{
 		{
 			name:                  "Valid config with LimitMiB",
@@ -3455,6 +3456,16 @@ func TestScrapeMemoryLimiterValidation(t *testing.T) {
 			expectedSpikeLimitMiB:        20,
 			expectedSpikeLimitPercentage: 10,
 		},
+		{
+			name:             "Valid strategy token_bucket",
+			config:           ScrapeMemoryLimiterConfig{LimitMiB: 100, Strategy: "token_bucket"},
+			expectedStrategy: "token_bucket",
+		},
+		{
+			name:        "Invalid strategy",
+			config:      ScrapeMemoryLimiterConfig{LimitMiB: 100, Strategy: "unsupported_strategy"},
+			expectedErr: "scrape_memory_limiter strategy must be either 'probabilistic' or 'token_bucket'",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -3469,6 +3480,11 @@ func TestScrapeMemoryLimiterValidation(t *testing.T) {
 				}
 				if c.expectedSpikeLimitPercentage != 0 {
 					require.Equal(t, c.expectedSpikeLimitPercentage, c.config.SpikeLimitPercentage)
+				}
+				if c.expectedStrategy != "" {
+					require.Equal(t, c.expectedStrategy, c.config.Strategy)
+				} else {
+					require.Equal(t, "probabilistic", c.config.Strategy)
 				}
 			}
 		})

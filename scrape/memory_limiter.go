@@ -15,6 +15,7 @@ package scrape
 
 import (
 	"log/slog"
+	"math"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -44,6 +45,9 @@ type scrapeMemoryLimiter struct {
 	lastCheck       time.Time
 	allocMiB        float64
 	allocPercentage float64
+
+	lastTokenUpdate time.Time
+	tokens          float64
 
 	maxScrapeSize    int
 	consecutiveSkips map[uint64]int
@@ -135,12 +139,61 @@ func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize in
 		return true
 	}
 
-	if l.consecutiveSkips[hash] >= 5 {
-		// Starvation prevention: force scrape if skipped 5 times sequentially.
-		l.consecutiveSkips[hash] = 0
-		return true
+	strategy := l.config.Strategy
+	if strategy == "" {
+		strategy = "probabilistic"
 	}
 
+	if strategy == "token_bucket" {
+		// Initialize maxTokens to 10% of limits as a reasonable bucket size
+		maxTokens := float64(50 * 1024 * 1024)
+		if l.config.LimitMiB > 0 {
+			maxTokens = float64(l.config.LimitMiB) * 1024 * 102.4 // 10% of MiB limit
+		}
+
+		if l.lastTokenUpdate.IsZero() {
+			l.lastTokenUpdate = now
+			l.tokens = maxTokens
+		}
+
+		elapsed := now.Sub(l.lastTokenUpdate).Seconds()
+		if elapsed > 0 {
+			rate := maxTokens * (1.0 - pressure)
+			l.tokens += rate * elapsed
+			if l.tokens > maxTokens {
+				l.tokens = maxTokens
+			}
+			l.lastTokenUpdate = now
+		}
+
+		cost := float64(lastScrapeSize)
+		if cost == 0 {
+			cost = 1000 // default minimum cost
+		}
+
+		// IOU logic: If we have consecutive skips, we discount the cost by 50% per skip to effectively queue large targets
+		discount := float64(1.0)
+		if skips, ok := l.consecutiveSkips[hash]; ok {
+			discount = math.Pow(0.5, float64(skips))
+		}
+		cost = cost * discount
+
+		if pressure == 1.0 {
+			l.consecutiveSkips[hash]++
+			return false // Must drop to prevent OOM
+		}
+
+		if l.tokens >= cost {
+			l.tokens -= cost
+			l.consecutiveSkips[hash] = 0
+			return true
+		}
+
+		l.consecutiveSkips[hash]++
+		return false
+	}
+
+	// Strategy: Probabilistic (Default)
 	// Fairness formula: scale the drop probability by relative size of this scrape compared to max seen.
 	// Smallest scrapes multiplied by 0.5, largest by 1.5. Cap at 1.0.
 	sizeFactor := 1.0
@@ -148,8 +201,16 @@ func (l *scrapeMemoryLimiter) TargetScrapeAllowed(hash uint64, lastScrapeSize in
 		sizeFactor = float64(lastScrapeSize) / float64(l.maxScrapeSize)
 	}
 
-	dropProb := pressure * (0.5 + sizeFactor)
-	if dropProb > 1.0 {
+	// Exponential decay of drop probability based on starvation (consecutive skips)
+	priorityMultiplier := 1.0
+	if skips, ok := l.consecutiveSkips[hash]; ok {
+		priorityMultiplier = math.Pow(0.5, float64(skips))
+	}
+
+	dropProb := pressure * (0.5 + sizeFactor) * priorityMultiplier
+	if pressure >= 1.0 {
+		dropProb = 1.0 // Force drop when hard limit is breached
+	} else if dropProb > 1.0 {
 		dropProb = 1.0
 	}
 

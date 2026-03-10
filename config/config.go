@@ -284,6 +284,7 @@ var (
 		SpikeLimitMiB:        0, // 20% of limit_mib by default, applied later
 		LimitPercentage:      0,
 		SpikeLimitPercentage: 0, // 20% of limit_percentage by default, applied later
+		Strategy:             "probabilistic",
 	}
 )
 
@@ -1628,6 +1629,7 @@ type ScrapeMemoryLimiterConfig struct {
 	SpikeLimitMiB        uint64         `yaml:"spike_limit_mib,omitempty"`
 	LimitPercentage      uint32         `yaml:"limit_percentage,omitempty"`
 	SpikeLimitPercentage uint32         `yaml:"spike_limit_percentage,omitempty"`
+	Strategy             string         `yaml:"strategy,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
@@ -1648,6 +1650,9 @@ func (c *ScrapeMemoryLimiterConfig) ApplyDefaults() {
 	if c.LimitPercentage > 0 && c.SpikeLimitPercentage == 0 {
 		c.SpikeLimitPercentage = c.LimitPercentage / 5
 	}
+	if c.Strategy == "" {
+		c.Strategy = "probabilistic"
+	}
 }
 
 // Validate checks the memory limiter configuration limits.
@@ -1667,6 +1672,9 @@ func (c *ScrapeMemoryLimiterConfig) Validate() error {
 	}
 	if c.SpikeLimitPercentage != 0 && c.SpikeLimitPercentage >= c.LimitPercentage && c.LimitPercentage != 0 {
 		return errors.New("scrape_memory_limiter spike_limit_percentage must be less than limit_percentage")
+	}
+	if c.Strategy != "probabilistic" && c.Strategy != "token_bucket" {
+		return errors.New("scrape_memory_limiter strategy must be either 'probabilistic' or 'token_bucket'")
 	}
 	return nil
 }

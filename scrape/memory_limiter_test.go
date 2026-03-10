@@ -124,45 +124,78 @@ func TestMemoryLimiter_TargetScrapeAllowed(t *testing.T) {
 	}
 }
 
-func TestMemoryLimiter_Fairness(t *testing.T) {
+func TestMemoryLimiter_StrategyProbabilistic(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		logger := slog.New(slog.DiscardHandler)
 		l := newScrapeMemoryLimiter(&config.ScrapeMemoryLimiterConfig{
 			LimitMiB:      100,
 			SpikeLimitMiB: 20, // soft limit is 80
+			Strategy:      "probabilistic",
 		}, logger)
 
-		// Hardcode random to always return 0.5 for predictable probability testing.
-		l.randFloat = func() float64 { return 0.5 }
+		// Set random so probability drops are predictable.
+		l.randFloat = func() float64 { return 0.2 }
 
-		// Memory is at 90 MiB (50% pressure: (90 - 80) / (100 - 80) = 10 / 20 = 0.5)
+		// Memory is at 90 MiB (50% pressure)
 		l.readMemStats = func(m *runtime.MemStats) {
 			m.Alloc = 90 * 1024 * 1024
 		}
 		l.totalMemory = func() uint64 { return 1000 * 1024 * 1024 }
 
-		// Establish maxScrapeSize. Since pressure is 0.5, sizeFactor is 1.0 (it's the max),
-		// dropProb = 0.5 * 1.5 = 0.75, which is > 0.5 so it will be dropped!
-		// Wait, if we want it to be accepted, we should just manually set maxScrapeSize.
-		// Or we can let it be dropped, it sets maxScrapeSize anyway.
-		allowed := l.TargetScrapeAllowed(1, 1000)
-		require.False(t, allowed)
-		require.Equal(t, 1000, l.maxScrapeSize)
+		// Target 1 establishes maxScrapeSize of 1000.
+		// multiplier = 1.0, pressure = 0.5, sizeFactor = 1.0
+		// dropProb = 0.75. Since 0.2 < 0.75, it drops.
+		require.False(t, l.TargetScrapeAllowed(1, 1000))
 
-		// Target 2 is large (1000). sizeFactor = 1.0. dropProb = 0.5 * (0.5 + 1.0) = 0.75.
-		// Since 0.5 < 0.75, it should be dropped.
-		require.False(t, l.TargetScrapeAllowed(2, 1000))
+		// Target 2 is small (10). sizeFactor = 0.01.
+		// dropProb = 0.5 * 0.51 = 0.255. 0.2 < 0.255 is true, drops.
+		require.False(t, l.TargetScrapeAllowed(2, 10))
 
-		// Target 3 is small (10). sizeFactor = 0.01. dropProb = 0.5 * (0.5 + 0.01) = 0.255.
-		// Since 0.5 < 0.255 is false, it should be allowed.
-		require.True(t, l.TargetScrapeAllowed(3, 10))
+		// Test Exponential Decay Starvation Prevention on Target 1
+		// Try 2: skips=1, multiplier=0.5. dropProb=0.375. 0.2 < 0.375 -> drops.
+		require.False(t, l.TargetScrapeAllowed(1, 1000))
+		// Try 3: skips=2, multiplier=0.25. dropProb=0.187. 0.2 < 0.187 is FALSE -> allowed!
+		require.True(t, l.TargetScrapeAllowed(1, 1000))
+	})
+}
 
-		// Test starvation prevention on Target 2 (large)
-		// It has been skipped 1 time already.
-		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 2 skips
-		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 3 skips
-		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 4 skips
-		require.False(t, l.TargetScrapeAllowed(2, 1000)) // 5 skips
-		require.True(t, l.TargetScrapeAllowed(2, 1000))  // 6th time is forced allowed!
+func TestMemoryLimiter_StrategyTokenBucket(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logger := slog.New(slog.DiscardHandler)
+		l := newScrapeMemoryLimiter(&config.ScrapeMemoryLimiterConfig{
+			LimitMiB:      100,
+			SpikeLimitMiB: 20, // soft limit is 80
+			Strategy:      "token_bucket",
+		}, logger)
+
+		// Memory is at 90 MiB (50% pressure)
+		l.readMemStats = func(m *runtime.MemStats) {
+			m.Alloc = 90 * 1024 * 1024
+		}
+
+		// Initial TargetScrapeAllowed generates tokens.
+		// maxTokens = 10 MiB (10% of 100 MiB limit).
+		// rate = maxTokens * (1.0 - 0.5 pressure) = 5 MiB per second.
+
+		// Attempting 11 MiB scrape. This instantly drops because cost > maxTokens.
+		// Actually maxTokens = 10 * 1024 * 102.4 = 1,048,576. Wait, calculation was 100 * 1024 * 102.4 = 10,485,760 bytes = ~10MiB.
+		// Let's scrape something extremely large: 30 million bytes. Cost is 30,000,000.
+		// This is larger than max tokens, so it drops.
+		require.False(t, l.TargetScrapeAllowed(1, 30_000_000))
+
+		// Try again immediately, elapsed is 0, no new tokens. Drops.
+		// skips=1, cost = 15,000,000. Still > 10,485,760.
+		require.False(t, l.TargetScrapeAllowed(1, 30_000_000))
+
+		// Try to scrape a tiny target. Cost=1000. 1000 <= 10,485,760 tokens. Succeeds!
+		require.True(t, l.TargetScrapeAllowed(2, 1000))
+
+		// Now let's advance time so tokens fully regenerate and see if Target 1 passes due to IOUs.
+		time.Sleep(3 * time.Second)                            // rate is 5MB/s, so 3 seconds is 15MB, capping at ~10MB.
+		require.False(t, l.TargetScrapeAllowed(3, 11_000_000)) // Target 3 has no IOUs, cost=11M > 10M -> drops.
+
+		// Target 1 has IOUs (skips=2, discount=0.25). cost = 30M * 0.25 = 7.5M.
+		// Bucket has 10M tokens. So this WILL succeed now!
+		require.True(t, l.TargetScrapeAllowed(1, 30_000_000))
 	})
 }
