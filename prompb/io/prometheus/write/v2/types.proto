@@ -157,11 +157,20 @@ message Metadata {
   uint32 unit_ref = 4;
 }
 
-// A native histogram message, supporting
-// * sparse exponential bucketing, custom bucketing.
-// * float or integer histograms.
+// A histogram message, supporting both sparse exponential bucketing (native histograms)
+// and classic/fixed bucketing.
 //
-// See the full spec: https://prometheus.io/docs/specs/native_histograms/
+// Native histograms should set fields: schema, zero_threshold, zero_count,
+// negative_spans, negative_counts/deltas, positive_spans, positive_counts/deltas.
+//
+// Classic histograms should set fields: classic_buckets.
+//
+// Both types must set common fields: count, sum, timestamp, start_timestamp, reset_hint.
+//
+// Both native and classic buckets can be sent together in a single Histogram message,
+// representing a combined histogram.
+//
+// See the full spec for native histograms: https://prometheus.io/docs/specs/native_histograms/
 message Histogram {
   enum ResetHint {
     RESET_HINT_UNSPECIFIED = 0; // Need to test for a counter reset explicitly.
@@ -176,12 +185,9 @@ message Histogram {
   }
   double sum = 3; // Sum of observations in the histogram.
 
-  // The schema defines the bucket schema. Currently, valid numbers
-  // are -53 and numbers in range of -4 <= n <= 8. More valid numbers might be
+  // The schema defines the bucket schema for native histograms. Currently, valid numbers
+  // are in range of -4 <= n <= 8. More valid numbers might be
   // added in future for new bucketing layouts.
-  //
-  // The schema equal to -53 means custom buckets. See
-  // custom_values field description for more details.
   //
   // Values between -4 and 8 represent base-2 bucket schema, where 1
   // is a bucket boundary in each case, and then each power of two is
@@ -194,7 +200,7 @@ message Histogram {
     double zero_count_float   = 7;
   }
 
-  // Negative Buckets.
+  // Negative Buckets for native histograms.
   repeated BucketSpan negative_spans =  8 [(gogoproto.nullable) = false];
   // Use either "negative_deltas" or "negative_counts", the former for
   // regular histograms with integer counts, the latter for
@@ -202,12 +208,7 @@ message Histogram {
   repeated sint64 negative_deltas    =  9; // Count delta of each bucket compared to previous one (or to zero for 1st bucket).
   repeated double negative_counts    = 10; // Absolute count of each bucket.
 
-  // Positive Buckets.
-  //
-  // In case of custom buckets (-53 schema value) the positive buckets are interpreted as follows:
-  // * The span offset+length points to an the index of the custom_values array
-  // or +Inf if pointing to the len of the array.
-  // * The counts and deltas have the same meaning as for exponential histograms.
+  // Positive Buckets for native histograms.
   repeated BucketSpan positive_spans = 11 [(gogoproto.nullable) = false];
   // Use either "positive_deltas" or "positive_counts", the former for
   // regular histograms with integer counts, the latter for
@@ -222,34 +223,9 @@ message Histogram {
   // for conversion from/to time.Time to Prometheus timestamp.
   int64 timestamp = 15;
 
-  // custom_values is an additional field used by non-exponential bucketing layouts.
-  //
-  // For custom buckets (-53 schema value) custom_values specify monotonically
-  // increasing upper inclusive boundaries for the bucket counts with arbitrary
-  // widths for this histogram. In other words, custom_values represents custom,
-  // explicit bucketing that could have been converted from the classic histograms.
-  //
-  // Those bounds are then referenced by spans in positive_spans with corresponding positive
-  // counts of deltas (refer to positive_spans for more details). This way we can
-  // have encode sparse histograms with custom bucketing (many buckets are often
-  // not used).
-  //
-  // Note that for custom bounds, even negative observations are placed in the positive
-  // counts to simplify the implementation and avoid ambiguity of where to place
-  // an underflow bucket, e.g. (-2, 1]. Therefore negative buckets and
-  // the zero bucket are unused, if the schema indicates custom bucketing.
-  //
-  // For each upper boundary the previous boundary represent the lower exclusive
-  // boundary for that bucket. The first element is the upper inclusive boundary
-  // for the first bucket, which implicitly has a lower inclusive bound of -Inf.
-  // This is similar to "le" label semantics on classic histograms. You may add a
-  // bucket with an upper bound of 0 to make sure that you really have no negative
-  // observations, but in practice, native histogram rendering will show both with
-  // or without first upper boundary 0 and no negative counts as the same case.
-  //
-  // The last element is not only the upper inclusive bound of the last regular
-  // bucket, but implicitly the lower exclusive bound of the +Inf bucket.
-  repeated double custom_values = 16;
+  // custom_values is deprecated and no longer used in this version of the protocol.
+  // Use classic_buckets for fixed bucket histograms.
+  repeated double custom_values = 16 [deprecated = true];
 
   // start_timestamp represents an optional start timestamp for the histogram sample,
   // in ms format. The start timestamp represents the time when the histogram
@@ -273,8 +249,6 @@ message Histogram {
   // This allows sending histograms with explicit bucket boundaries and cumulative counts.
   // If both native buckets (exponential) and classic buckets are present,
   // it represents a combined histogram.
-  // If both legacy custom buckets (schema = -53 and custom_values) and
-  // classic_buckets are present, classic_buckets takes precedence.
   repeated ClassicBucket classic_buckets = 18;
 }
 
