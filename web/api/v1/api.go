@@ -356,7 +356,12 @@ func NewAPI(
 	}
 
 	if rwEnabled {
-		a.remoteWriteHandler = remote.NewWriteHandler(logger, registerer, ap, acceptRemoteWriteProtoMsgs, stZeroIngestionEnabled, enableTypeAndUnitLabels, appendMetadata)
+		cfg := a.config()
+		a.remoteWriteHandler = remote.NewWriteHandler(
+			logger, registerer, ap, acceptRemoteWriteProtoMsgs,
+			stZeroIngestionEnabled, enableTypeAndUnitLabels, appendMetadata,
+			cfg.GlobalConfig.ConvertClassicHistogramsToNHCB,
+		)
 	}
 	if otlpEnabled {
 		a.otlpWriteHandler = remote.NewOTLPWriteHandler(logger, registerer, apV2, configFunc, remote.OTLPOptions{

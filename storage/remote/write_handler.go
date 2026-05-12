@@ -48,6 +48,8 @@ type writeHandler struct {
 	ingestSTZeroSample      bool
 	enableTypeAndUnitLabels bool
 	appendMetadata          bool
+
+	convertClassicHistogramsToNHCB bool
 }
 
 const maxAheadTime = 10 * time.Minute
@@ -57,7 +59,7 @@ const maxAheadTime = 10 * time.Minute
 //
 // NOTE(bwplotka): When accepting v2 proto and spec, partial writes are possible
 // as per https://prometheus.io/docs/specs/remote_write_spec_2_0/#partial-write.
-func NewWriteHandler(logger *slog.Logger, reg prometheus.Registerer, appendable storage.Appendable, acceptedMsgs remoteapi.MessageTypes, ingestSTZeroSample, enableTypeAndUnitLabels, appendMetadata bool) http.Handler {
+func NewWriteHandler(logger *slog.Logger, reg prometheus.Registerer, appendable storage.Appendable, acceptedMsgs remoteapi.MessageTypes, ingestSTZeroSample, enableTypeAndUnitLabels, appendMetadata, convertClassicHistogramsToNHCB bool) http.Handler {
 	h := &writeHandler{
 		logger:     logger,
 		appendable: appendable,
@@ -74,9 +76,10 @@ func NewWriteHandler(logger *slog.Logger, reg prometheus.Registerer, appendable 
 			Help:      "The total number of received remote write samples (and histogram samples) which were ingested without corresponding metadata.",
 		}),
 
-		ingestSTZeroSample:      ingestSTZeroSample,
-		enableTypeAndUnitLabels: enableTypeAndUnitLabels,
-		appendMetadata:          appendMetadata,
+		ingestSTZeroSample:             ingestSTZeroSample,
+		enableTypeAndUnitLabels:        enableTypeAndUnitLabels,
+		appendMetadata:                 appendMetadata,
+		convertClassicHistogramsToNHCB: convertClassicHistogramsToNHCB,
 	}
 	return remoteapi.NewWriteHandler(h, acceptedMsgs, remoteapi.WithWriteHandlerLogger(logger))
 }
@@ -401,13 +404,60 @@ func (h *writeHandler) appendV2(app storage.Appender, req *writev2.Request, rs *
 					h.logger.Debug("Error when appending ST from remote write request", "err", err, "series", ls.String(), "start_timestamp", hp.StartTimestamp, "timestamp", hp.Timestamp)
 				}
 			}
-			if hp.IsFloatHistogram() {
-				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToFloatHistogram())
-			} else {
-				ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToIntHistogram(), nil)
+			hasNative := hp.HasNativeBuckets()
+			hasClassic := hp.HasClassicBuckets()
+
+			var appendErr error
+
+			// 1. Handle Native Histogram part.
+			if hasNative {
+				if hp.IsFloatHistogram() {
+					ref, appendErr = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToNativeFloatHistogram())
+				} else {
+					ref, appendErr = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToNativeIntHistogram(), nil)
+				}
+				if appendErr == nil {
+					rs.Histograms++
+				}
 			}
+
+			// 2. Handle Classic Histogram part or conversion.
+			if hasClassic {
+				if hasNative {
+					if !h.convertClassicHistogramsToNHCB {
+						// Both are present, and we are NOT converting classic to NHCB.
+						// Store classic as well (as classic series).
+						err := h.appendClassicSeries(app, hp, ls, rs)
+						if err != nil {
+							appendErr = err
+						}
+					}
+				} else {
+					// Only classic is present.
+					if h.convertClassicHistogramsToNHCB {
+						// Convert to Native (NHCB) and store.
+						if hp.IsFloatHistogram() {
+							ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToFloatHistogram())
+						} else {
+							ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToIntHistogram(), nil)
+						}
+						if err == nil {
+							rs.Histograms++
+						} else {
+							appendErr = err
+						}
+					} else {
+						// Store as classic series.
+						err := h.appendClassicSeries(app, hp, ls, rs)
+						if err != nil {
+							appendErr = err
+						}
+					}
+				}
+			}
+
+			err = appendErr
 			if err == nil {
-				rs.Histograms++
 				continue
 			}
 			// Handle append error.
@@ -488,6 +538,27 @@ func (*writeHandler) handleHistogramZeroSample(app storage.Appender, ref storage
 		ref, err = app.AppendHistogramSTZeroSample(ref, l, hist.Timestamp, st, hist.ToIntHistogram(), nil)
 	}
 	return ref, err
+}
+
+func (*writeHandler) appendClassicSeries(app storage.Appender, hp writev2.Histogram, ls labels.Labels, rs *remoteapi.WriteResponseStats) error {
+	var customHist any
+	if hp.IsFloatHistogram() {
+		customHist = hp.ToFloatHistogram()
+	} else {
+		customHist = hp.ToIntHistogram()
+	}
+
+	lsetBuilder := labels.NewBuilder(ls)
+
+	emitFn := func(lbls labels.Labels, val float64) error {
+		_, err := app.Append(0, lbls, hp.Timestamp, val)
+		if err == nil && rs != nil {
+			rs.Samples++
+		}
+		return err
+	}
+
+	return histogram.ConvertNHCBToClassic(customHist, ls, lsetBuilder, emitFn)
 }
 
 // TODO(bwplotka): Consider exposing timeLimitAppender and bucketLimitAppender appenders from scrape/target.go

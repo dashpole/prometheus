@@ -98,6 +98,33 @@ func (h Histogram) ToIntHistogram() *histogram.Histogram {
 	if h.IsFloatHistogram() {
 		return nil
 	}
+	if len(h.GetClassicBuckets()) > 0 {
+		cbs := h.GetClassicBuckets()
+		bounds := make([]float64, len(cbs))
+		buckets := make([]int64, len(cbs))
+
+		var prevCount float64
+		for i, cb := range cbs {
+			bounds[i] = cb.UpperBound
+			buckets[i] = int64(cb.CumulativeCount - prevCount)
+			prevCount = cb.CumulativeCount
+		}
+
+		var spans []histogram.Span
+		if len(buckets) > 0 {
+			spans = []histogram.Span{{Offset: 0, Length: uint32(len(buckets))}}
+		}
+
+		return &histogram.Histogram{
+			CounterResetHint: histogram.CounterResetHint(h.ResetHint),
+			Schema:           histogram.CustomBucketsSchema,
+			Count:            h.GetCountInt(),
+			Sum:              h.Sum,
+			PositiveSpans:    spans,
+			PositiveBuckets:  buckets,
+			CustomValues:     bounds,
+		}
+	}
 	return &histogram.Histogram{
 		CounterResetHint: histogram.CounterResetHint(h.ResetHint),
 		Schema:           h.Schema,
@@ -117,6 +144,41 @@ func (h Histogram) ToIntHistogram() *histogram.Histogram {
 // of float histogram. If the underlying implementation is an integer histogram, a
 // conversion is performed.
 func (h Histogram) ToFloatHistogram() *histogram.FloatHistogram {
+	if len(h.GetClassicBuckets()) > 0 {
+		cbs := h.GetClassicBuckets()
+		bounds := make([]float64, len(cbs))
+		buckets := make([]float64, len(cbs))
+
+		var prevCount float64
+		for i, cb := range cbs {
+			bounds[i] = cb.UpperBound
+			buckets[i] = cb.CumulativeCount - prevCount
+			prevCount = cb.CumulativeCount
+		}
+
+		var spans []histogram.Span
+		if len(buckets) > 0 {
+			spans = []histogram.Span{{Offset: 0, Length: uint32(len(buckets))}}
+		}
+
+		var count float64
+		if h.IsFloatHistogram() {
+			count = h.GetCountFloat()
+		} else {
+			count = float64(h.GetCountInt())
+		}
+
+		return &histogram.FloatHistogram{
+			CounterResetHint: histogram.CounterResetHint(h.ResetHint),
+			Schema:           histogram.CustomBucketsSchema,
+			Count:            count,
+			Sum:              h.Sum,
+			PositiveSpans:    spans,
+			PositiveBuckets:  buckets,
+			CustomValues:     bounds,
+		}
+	}
+
 	if h.IsFloatHistogram() {
 		return &histogram.FloatHistogram{
 			CounterResetHint: histogram.CounterResetHint(h.ResetHint),
@@ -146,6 +208,69 @@ func (h Histogram) ToFloatHistogram() *histogram.FloatHistogram {
 		NegativeBuckets:  deltasToCounts(h.GetNegativeDeltas()),
 		CustomValues:     h.GetCustomValues(),
 	}
+}
+
+// ToNativeIntHistogram returns integer Prometheus histogram from the remote implementation
+// of integer histogram, ignoring classic buckets.
+func (h Histogram) ToNativeIntHistogram() *histogram.Histogram {
+	if h.IsFloatHistogram() {
+		return nil
+	}
+	return &histogram.Histogram{
+		CounterResetHint: histogram.CounterResetHint(h.ResetHint),
+		Schema:           h.Schema,
+		ZeroThreshold:    h.ZeroThreshold,
+		ZeroCount:        h.GetZeroCountInt(),
+		Count:            h.GetCountInt(),
+		Sum:              h.Sum,
+		PositiveSpans:    spansProtoToSpans(h.GetPositiveSpans()),
+		PositiveBuckets:  h.GetPositiveDeltas(),
+		NegativeSpans:    spansProtoToSpans(h.GetNegativeSpans()),
+		NegativeBuckets:  h.GetNegativeDeltas(),
+		CustomValues:     h.GetCustomValues(),
+	}
+}
+
+// ToNativeFloatHistogram returns float Prometheus histogram from the remote implementation
+// of float histogram, ignoring classic buckets.
+func (h Histogram) ToNativeFloatHistogram() *histogram.FloatHistogram {
+	if h.IsFloatHistogram() {
+		return &histogram.FloatHistogram{
+			CounterResetHint: histogram.CounterResetHint(h.ResetHint),
+			Schema:           h.Schema,
+			ZeroThreshold:    h.ZeroThreshold,
+			ZeroCount:        h.GetZeroCountFloat(),
+			Count:            h.GetCountFloat(),
+			Sum:              h.Sum,
+			PositiveSpans:    spansProtoToSpans(h.GetPositiveSpans()),
+			PositiveBuckets:  h.GetPositiveCounts(),
+			NegativeSpans:    spansProtoToSpans(h.GetNegativeSpans()),
+			NegativeBuckets:  h.GetNegativeCounts(),
+			CustomValues:     h.GetCustomValues(),
+		}
+	}
+	// Conversion from integer histogram.
+	return &histogram.FloatHistogram{
+		CounterResetHint: histogram.CounterResetHint(h.ResetHint),
+		Schema:           h.Schema,
+		ZeroThreshold:    h.ZeroThreshold,
+		ZeroCount:        float64(h.GetZeroCountInt()),
+		Count:            float64(h.GetCountInt()),
+		Sum:              h.Sum,
+		PositiveSpans:    spansProtoToSpans(h.GetPositiveSpans()),
+		PositiveBuckets:  deltasToCounts(h.GetPositiveDeltas()),
+		NegativeSpans:    spansProtoToSpans(h.GetNegativeSpans()),
+		NegativeBuckets:  deltasToCounts(h.GetNegativeDeltas()),
+		CustomValues:     h.GetCustomValues(),
+	}
+}
+
+func (h Histogram) HasNativeBuckets() bool {
+	return len(h.PositiveSpans) > 0 || len(h.NegativeSpans) > 0
+}
+
+func (h Histogram) HasClassicBuckets() bool {
+	return len(h.ClassicBuckets) > 0
 }
 
 func spansProtoToSpans(s []BucketSpan) []histogram.Span {

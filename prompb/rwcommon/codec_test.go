@@ -315,3 +315,47 @@ func TestFromIntOrFloatHistogram_ResetHint(t *testing.T) {
 		})
 	}
 }
+
+func TestHistogramExplicitBucketsPrecedence(t *testing.T) {
+	t.Run("ToIntHistogram", func(t *testing.T) {
+		h := writev2.Histogram{
+			Count:        &writev2.Histogram_CountInt{CountInt: 10},
+			Sum:          20,
+			Schema:       2,                  // Exponential schema
+			CustomValues: []float64{1, 2, 3}, // NHCB values
+			ClassicBuckets: []*writev2.ClassicBucket{
+				{UpperBound: 0.1, CumulativeCount: 5},
+				{UpperBound: 0.5, CumulativeCount: 7},
+				{UpperBound: 1.0, CumulativeCount: 10},
+			},
+		}
+
+		ih := h.ToIntHistogram()
+		require.NotNil(t, ih)
+		require.Equal(t, histogram.CustomBucketsSchema, ih.Schema)
+		require.Equal(t, []float64{0.1, 0.5, 1.0}, ih.CustomValues)
+		require.Equal(t, []int64{5, 2, 3}, ih.PositiveBuckets)
+		require.Equal(t, []histogram.Span{{Offset: 0, Length: 3}}, ih.PositiveSpans)
+	})
+
+	t.Run("ToFloatHistogram", func(t *testing.T) {
+		h := writev2.Histogram{
+			Count:        &writev2.Histogram_CountFloat{CountFloat: 10.5},
+			Sum:          20.5,
+			Schema:       2,
+			CustomValues: []float64{1, 2, 3},
+			ClassicBuckets: []*writev2.ClassicBucket{
+				{UpperBound: 0.1, CumulativeCount: 5.5},
+				{UpperBound: 0.5, CumulativeCount: 7.5},
+				{UpperBound: 1.0, CumulativeCount: 10.5},
+			},
+		}
+
+		fh := h.ToFloatHistogram()
+		require.NotNil(t, fh)
+		require.Equal(t, histogram.CustomBucketsSchema, fh.Schema)
+		require.Equal(t, []float64{0.1, 0.5, 1.0}, fh.CustomValues)
+		require.Equal(t, []float64{5.5, 2.0, 3.0}, fh.PositiveBuckets)
+		require.Equal(t, []histogram.Span{{Offset: 0, Length: 3}}, fh.PositiveSpans)
+	})
+}

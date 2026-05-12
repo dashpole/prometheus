@@ -268,6 +268,19 @@ message Histogram {
   // Zero value means value not set. If you need to use exactly zero value for
   // the timestamp, use 1 millisecond before or after.
   int64 start_timestamp = 17;
+
+  // Classic buckets (fixed buckets).
+  // This allows sending histograms with explicit bucket boundaries and cumulative counts.
+  // If both native buckets (exponential) and classic buckets are present,
+  // it represents a combined histogram.
+  // If both legacy custom buckets (schema = -53 and custom_values) and
+  // classic_buckets are present, classic_buckets takes precedence.
+  repeated ClassicBucket classic_buckets = 18;
+}
+
+message ClassicBucket {
+  double upper_bound = 1;
+  double cumulative_count = 2;
 }
 
 // A BucketSpan defines a number of consecutive buckets with their
