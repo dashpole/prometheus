@@ -409,50 +409,60 @@ func (h *writeHandler) appendV2(app storage.Appender, req *writev2.Request, rs *
 
 			var appendErr error
 
-			// 1. Handle Native Histogram part.
+			var goHist *histogram.Histogram
+			var goFloatHist *histogram.FloatHistogram
+
 			if hasNative {
 				if hp.IsFloatHistogram() {
-					ref, appendErr = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToNativeFloatHistogram())
+					goFloatHist = hp.ToNativeFloatHistogram()
 				} else {
-					ref, appendErr = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToNativeIntHistogram(), nil)
-				}
-				if appendErr == nil {
-					rs.Histograms++
+					goHist = hp.ToNativeIntHistogram()
 				}
 			}
 
-			// 2. Handle Classic Histogram part or conversion.
 			if hasClassic {
-				if hasNative {
-					if !h.convertClassicHistogramsToNHCB {
-						// Both are present, and we are NOT converting classic to NHCB.
-						// Store classic as well (as classic series).
-						err := h.appendClassicSeries(app, hp, ls, rs)
-						if err != nil {
-							appendErr = err
+				if !h.convertClassicHistogramsToNHCB {
+					// Store classic as well (as classic buckets in histogram).
+					if goHist == nil && goFloatHist == nil {
+						if hp.IsFloatHistogram() {
+							goFloatHist = &histogram.FloatHistogram{}
+						} else {
+							goHist = &histogram.Histogram{}
 						}
+					}
+
+					var classicBuckets []histogram.ClassicBucket
+					for _, cb := range hp.ClassicBuckets {
+						classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+							UpperBound:      cb.UpperBound,
+							CumulativeCount: cb.CumulativeCount,
+						})
+					}
+
+					if goHist != nil {
+						goHist.ClassicBuckets = classicBuckets
+					}
+					if goFloatHist != nil {
+						goFloatHist.ClassicBuckets = classicBuckets
 					}
 				} else {
-					// Only classic is present.
-					if h.convertClassicHistogramsToNHCB {
-						// Convert to Native (NHCB) and store.
+					// Both are present, and we ARE converting classic to NHCB.
+					// Drop classic buckets when both are present to avoid naming collision.
+					if !hasNative {
+						// Only classic is present, convert to Native (NHCB).
 						if hp.IsFloatHistogram() {
-							ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, nil, hp.ToFloatHistogram())
+							goFloatHist = hp.ToFloatHistogram()
 						} else {
-							ref, err = app.AppendHistogram(ref, ls, hp.Timestamp, hp.ToIntHistogram(), nil)
-						}
-						if err == nil {
-							rs.Histograms++
-						} else {
-							appendErr = err
-						}
-					} else {
-						// Store as classic series.
-						err := h.appendClassicSeries(app, hp, ls, rs)
-						if err != nil {
-							appendErr = err
+							goHist = hp.ToIntHistogram()
 						}
 					}
+				}
+			}
+
+			if goHist != nil || goFloatHist != nil {
+				ref, appendErr = app.AppendHistogram(ref, ls, hp.Timestamp, goHist, goFloatHist)
+				if appendErr == nil {
+					rs.Histograms++
 				}
 			}
 

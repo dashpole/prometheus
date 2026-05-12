@@ -77,6 +77,14 @@ type Histogram struct {
 	// schema is for custom buckets, and the ZeroThreshold, ZeroCount, NegativeSpans
 	// and NegativeBuckets fields are not used in that case.
 	CustomValues []float64
+	// Holds classic buckets for combined histograms.
+	ClassicBuckets []ClassicBucket
+}
+
+// ClassicBucket defines a classic histogram bucket.
+type ClassicBucket struct {
+	UpperBound      float64
+	CumulativeCount float64
 }
 
 // A Span defines a continuous sequence of buckets.
@@ -125,6 +133,11 @@ func (h *Histogram) Copy() *Histogram {
 	if len(h.PositiveBuckets) != 0 {
 		c.PositiveBuckets = make([]int64, len(h.PositiveBuckets))
 		copy(c.PositiveBuckets, h.PositiveBuckets)
+	}
+
+	if len(h.ClassicBuckets) != 0 {
+		c.ClassicBuckets = make([]ClassicBucket, len(h.ClassicBuckets))
+		copy(c.ClassicBuckets, h.ClassicBuckets)
 	}
 
 	return &c

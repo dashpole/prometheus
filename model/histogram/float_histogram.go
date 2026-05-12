@@ -59,6 +59,8 @@ type FloatHistogram struct {
 	// schema is for custom buckets, and the ZeroThreshold, ZeroCount, NegativeSpans
 	// and NegativeBuckets fields are not used in that case.
 	CustomValues []float64
+	// Holds classic buckets for combined histograms.
+	ClassicBuckets []ClassicBucket
 }
 
 func (h *FloatHistogram) UsesCustomBuckets() bool {
@@ -98,6 +100,11 @@ func (h *FloatHistogram) Copy() *FloatHistogram {
 	if len(h.PositiveBuckets) != 0 {
 		c.PositiveBuckets = make([]float64, len(h.PositiveBuckets))
 		copy(c.PositiveBuckets, h.PositiveBuckets)
+	}
+
+	if len(h.ClassicBuckets) != 0 {
+		c.ClassicBuckets = make([]ClassicBucket, len(h.ClassicBuckets))
+		copy(c.ClassicBuckets, h.ClassicBuckets)
 	}
 
 	return &c

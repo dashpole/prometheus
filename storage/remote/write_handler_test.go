@@ -867,6 +867,19 @@ func TestRemoteWriteHandler_V2Message(t *testing.T) {
 						}
 						requireEqual(t, mockHistogram{ls, hp.Timestamp, h, nil}, appendable.histograms[k])
 					}
+					if len(hp.ClassicBuckets) > 0 {
+						var storedClassicBuckets []histogram.ClassicBucket
+						if hp.IsFloatHistogram() {
+							storedClassicBuckets = appendable.histograms[k].fh.ClassicBuckets
+						} else {
+							storedClassicBuckets = appendable.histograms[k].h.ClassicBuckets
+						}
+						require.Equal(t, len(hp.ClassicBuckets), len(storedClassicBuckets))
+						for idx, cb := range hp.ClassicBuckets {
+							require.Equal(t, cb.UpperBound, storedClassicBuckets[idx].UpperBound)
+							require.Equal(t, cb.CumulativeCount, storedClassicBuckets[idx].CumulativeCount)
+						}
+					}
 					k++
 				}
 				if tc.appendExemplarErr == nil {
