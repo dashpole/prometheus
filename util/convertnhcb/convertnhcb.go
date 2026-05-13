@@ -171,29 +171,9 @@ func (h TempHistogram) Convert() (*histogram.Histogram, *histogram.FloatHistogra
 }
 
 func (h TempHistogram) convertToIntegerHistogram(count uint64) (*histogram.Histogram, *histogram.FloatHistogram, error) {
-	rh := &histogram.Histogram{
-		Schema:          histogram.CustomBucketsSchema,
-		Count:           count,
-		Sum:             h.sum,
-		PositiveSpans:   []histogram.Span{{Length: uint32(len(h.buckets))}},
-		PositiveBuckets: make([]int64, len(h.buckets)),
-	}
-
-	if len(h.buckets) > 1 {
-		rh.CustomValues = make([]float64, len(h.buckets)-1) // Not storing the last +Inf bucket.
-	}
-
-	prevCount := int64(0)
-	prevDelta := int64(0)
-	for i, b := range h.buckets {
-		// delta is the actual bucket count as the input is cumulative.
-		delta := int64(b.count) - prevCount
-		rh.PositiveBuckets[i] = delta - prevDelta
-		prevCount = int64(b.count)
-		prevDelta = delta
-		if b.le != math.Inf(1) {
-			rh.CustomValues[i] = b.le
-		}
+	// Ensure +Inf bucket is populated.
+	if len(h.buckets) == 0 || h.buckets[len(h.buckets)-1].le != math.Inf(1) {
+		h.buckets = append(h.buckets, tempHistogramBucket{le: math.Inf(1), count: h.count})
 	}
 
 	if count != uint64(h.buckets[len(h.buckets)-1].count) {
@@ -201,29 +181,27 @@ func (h TempHistogram) convertToIntegerHistogram(count uint64) (*histogram.Histo
 		return nil, nil, h.err
 	}
 
-	return rh.Compact(2), nil, nil
+	rh := &histogram.Histogram{
+		Schema: 0,
+		Count:  count,
+		Sum:    h.sum,
+	}
+
+	rh.ClassicBuckets = make([]histogram.ClassicBucket, len(h.buckets))
+	for i, b := range h.buckets {
+		rh.ClassicBuckets[i] = histogram.ClassicBucket{
+			UpperBound:      b.le,
+			CumulativeCount: b.count,
+		}
+	}
+
+	return rh, nil, nil
 }
 
 func (h TempHistogram) convertToFloatHistogram() (*histogram.Histogram, *histogram.FloatHistogram, error) {
-	rh := &histogram.FloatHistogram{
-		Schema:          histogram.CustomBucketsSchema,
-		Count:           h.count,
-		Sum:             h.sum,
-		PositiveSpans:   []histogram.Span{{Length: uint32(len(h.buckets))}},
-		PositiveBuckets: make([]float64, len(h.buckets)),
-	}
-
-	if len(h.buckets) > 1 {
-		rh.CustomValues = make([]float64, len(h.buckets)-1) // Not storing the last +Inf bucket.
-	}
-
-	prevCount := 0.0
-	for i, b := range h.buckets {
-		rh.PositiveBuckets[i] = b.count - prevCount
-		prevCount = b.count
-		if b.le != math.Inf(1) {
-			rh.CustomValues[i] = b.le
-		}
+	// Ensure +Inf bucket is populated.
+	if len(h.buckets) == 0 || h.buckets[len(h.buckets)-1].le != math.Inf(1) {
+		h.buckets = append(h.buckets, tempHistogramBucket{le: math.Inf(1), count: h.count})
 	}
 
 	if h.count != h.buckets[len(h.buckets)-1].count {
@@ -231,7 +209,21 @@ func (h TempHistogram) convertToFloatHistogram() (*histogram.Histogram, *histogr
 		return nil, nil, h.err
 	}
 
-	return nil, rh.Compact(0), nil
+	rfh := &histogram.FloatHistogram{
+		Schema: 0,
+		Count:  h.count,
+		Sum:    h.sum,
+	}
+
+	rfh.ClassicBuckets = make([]histogram.ClassicBucket, len(h.buckets))
+	for i, b := range h.buckets {
+		rfh.ClassicBuckets[i] = histogram.ClassicBucket{
+			UpperBound:      b.le,
+			CumulativeCount: b.count,
+		}
+	}
+
+	return nil, rfh, nil
 }
 
 func GetHistogramMetricBase(m labels.Labels, name string) labels.Labels {

@@ -5496,18 +5496,12 @@ metric: <
 					expectedClassicHistCount = 1
 				}
 			} else if metricsText.hasClassic {
-				switch {
-				case !tc.convertClassicHistToNHCB:
-					expectedClassicHistCount = 1
+				expectedClassicHistCount = 1
+				if tc.convertClassicHistToNHCB {
+					expectedNativeHistCount = 1
+					expectCustomBuckets = true
+				} else {
 					expectedNativeHistCount = 0
-				case tc.alwaysScrapeClassicHistograms && tc.convertClassicHistToNHCB:
-					expectedClassicHistCount = 1
-					expectedNativeHistCount = 1
-					expectCustomBuckets = true
-				case !tc.alwaysScrapeClassicHistograms && tc.convertClassicHistToNHCB:
-					expectedClassicHistCount = 0
-					expectedNativeHistCount = 1
-					expectCustomBuckets = true
 				}
 			}
 
@@ -5551,7 +5545,7 @@ metric: <
 
 				var expectedSchema int32
 				if expectCustomBuckets {
-					expectedSchema = histogram.CustomBucketsSchema
+					expectedSchema = 0 // Our new combined format uses schema 0!
 				} else {
 					expectedSchema = 3
 				}

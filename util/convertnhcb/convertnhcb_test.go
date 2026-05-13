@@ -35,9 +35,10 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedH: &histogram.Histogram{
-				Schema:          histogram.CustomBucketsSchema,
-				PositiveSpans:   []histogram.Span{},
-				PositiveBuckets: []int64{},
+				Schema: 0,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: math.Inf(1), CumulativeCount: 0},
+				},
 			},
 		},
 		"sum only": {
@@ -47,10 +48,11 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedH: &histogram.Histogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{},
-				PositiveBuckets: []int64{},
+				Schema: 0,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: math.Inf(1), CumulativeCount: 0},
+				},
 			},
 		},
 		"single integer bucket": {
@@ -61,12 +63,13 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedH: &histogram.Histogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Count:           1000,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{{Length: 1}},
-				PositiveBuckets: []int64{1000},
-				CustomValues:    []float64{0.5},
+				Schema: 0,
+				Count:  1000,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: 0.5, CumulativeCount: 1000},
+					{UpperBound: math.Inf(1), CumulativeCount: 1000},
+				},
 			},
 		},
 		"single float bucket": {
@@ -77,12 +80,13 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedFH: &histogram.FloatHistogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Count:           1337.42,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{{Length: 1}},
-				PositiveBuckets: []float64{1337.42},
-				CustomValues:    []float64{0.5},
+				Schema: 0,
+				Count:  1337.42,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: 0.5, CumulativeCount: 1337.42},
+					{UpperBound: math.Inf(1), CumulativeCount: 1337.42},
+				},
 			},
 		},
 		"happy case integer bucket": {
@@ -96,12 +100,14 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedH: &histogram.Histogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Count:           1000,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{{Length: 3}},
-				PositiveBuckets: []int64{50, 850, -850},
-				CustomValues:    []float64{0.5, 1.0},
+				Schema: 0,
+				Count:  1000,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: 0.5, CumulativeCount: 50},
+					{UpperBound: 1.0, CumulativeCount: 950},
+					{UpperBound: math.Inf(1), CumulativeCount: 1000},
+				},
 			},
 		},
 		"happy case float bucket": {
@@ -115,12 +121,14 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedFH: &histogram.FloatHistogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Count:           1000,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{{Length: 3}},
-				PositiveBuckets: []float64{50, 900.5, 49.5},
-				CustomValues:    []float64{0.5, 1.0},
+				Schema: 0,
+				Count:  1000,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: 0.5, CumulativeCount: 50},
+					{UpperBound: 1.0, CumulativeCount: 950.5},
+					{UpperBound: math.Inf(1), CumulativeCount: 1000},
+				},
 			},
 		},
 		"non cumulative bucket": {
@@ -171,12 +179,14 @@ func TestNHCBConvert(t *testing.T) {
 				return &h
 			},
 			expectedH: &histogram.Histogram{
-				Schema:          histogram.CustomBucketsSchema,
-				Count:           1000,
-				Sum:             1000.25,
-				PositiveSpans:   []histogram.Span{{Length: 3}},
-				PositiveBuckets: []int64{50, 850, -850},
-				CustomValues:    []float64{0.5, 1.0},
+				Schema: 0,
+				Count:  1000,
+				Sum:    1000.25,
+				ClassicBuckets: []histogram.ClassicBucket{
+					{UpperBound: 0.5, CumulativeCount: 50},
+					{UpperBound: 1.0, CumulativeCount: 950},
+					{UpperBound: math.Inf(1), CumulativeCount: 1000},
+				},
 			},
 		},
 	}

@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"strconv"
 	"time"
 
 	"github.com/prometheus/prometheus/model/exemplar"
@@ -2322,37 +2321,43 @@ func (a *headAppenderBase) addClassicPostings(s *memSeries, classicBuckets []his
 	defer h.virtualSeriesMtx.Unlock()
 
 	// 1. Add _count virtual postings
-	countID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-	h.virtualSeriesMap[storage.SeriesRef(countID)] = virtualSeriesInfo{
-		baseRef:   storage.SeriesRef(s.ref),
-		aliasType: "count",
-	}
 	countLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_count").Labels()
-	h.postings.Add(storage.SeriesRef(countID), countLabels)
+	if h.series.getByHash(countLabels.Hash(), countLabels) == nil {
+		countID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+		h.virtualSeriesMap[storage.SeriesRef(countID)] = virtualSeriesInfo{
+			baseRef:   storage.SeriesRef(s.ref),
+			aliasType: "count",
+		}
+		h.postings.Add(storage.SeriesRef(countID), countLabels)
+	}
 
 	// 2. Add _sum virtual postings
-	sumID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-	h.virtualSeriesMap[storage.SeriesRef(sumID)] = virtualSeriesInfo{
-		baseRef:   storage.SeriesRef(s.ref),
-		aliasType: "sum",
-	}
 	sumLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_sum").Labels()
-	h.postings.Add(storage.SeriesRef(sumID), sumLabels)
+	if h.series.getByHash(sumLabels.Hash(), sumLabels) == nil {
+		sumID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+		h.virtualSeriesMap[storage.SeriesRef(sumID)] = virtualSeriesInfo{
+			baseRef:   storage.SeriesRef(s.ref),
+			aliasType: "sum",
+		}
+		h.postings.Add(storage.SeriesRef(sumID), sumLabels)
+	}
 
 	// 3. Add _bucket virtual postings for each le
 	for _, cb := range classicBuckets {
-		bucketID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-		h.virtualSeriesMap[storage.SeriesRef(bucketID)] = virtualSeriesInfo{
-			baseRef:    storage.SeriesRef(s.ref),
-			aliasType:  "bucket",
-			upperBound: cb.UpperBound,
-		}
-		leStr := strconv.FormatFloat(cb.UpperBound, 'g', -1, 64)
+		leStr := labels.FormatOpenMetricsFloat(cb.UpperBound)
 		bucketLabels := labels.NewBuilder(s.lset).
 			Set("__name__", baseName+"_bucket").
 			Set("le", leStr).
 			Labels()
-		h.postings.Add(storage.SeriesRef(bucketID), bucketLabels)
+		if h.series.getByHash(bucketLabels.Hash(), bucketLabels) == nil {
+			bucketID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+			h.virtualSeriesMap[storage.SeriesRef(bucketID)] = virtualSeriesInfo{
+				baseRef:    storage.SeriesRef(s.ref),
+				aliasType:  "bucket",
+				upperBound: cb.UpperBound,
+			}
+			h.postings.Add(storage.SeriesRef(bucketID), bucketLabels)
+		}
 	}
 
 	s.classicPostingsAdded = true

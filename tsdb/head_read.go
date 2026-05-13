@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"math"
 	"slices"
-	"strconv"
 	"sync"
 
 	"github.com/prometheus/prometheus/model/histogram"
@@ -221,7 +220,7 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 		lb := labels.NewBuilder(s.labels())
 		lb.Set("__name__", baseName+"_"+info.aliasType)
 		if info.aliasType == "bucket" {
-			leStr := strconv.FormatFloat(info.upperBound, 'g', -1, 64)
+			leStr := labels.FormatOpenMetricsFloat(info.upperBound)
 			lb.Set("le", leStr)
 		}
 		builder.Assign(lb.Labels())

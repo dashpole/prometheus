@@ -485,13 +485,24 @@ func (h *Histogram) Validate() error {
 	}
 
 	sumOfBuckets := nCount + pCount + h.ZeroCount
-	if math.IsNaN(h.Sum) {
-		if sumOfBuckets > h.Count {
-			return fmt.Errorf("%d observations found in buckets, but the Count field is %d: %w", sumOfBuckets, h.Count, ErrHistogramCountNotBigEnough)
+	hasNative := len(h.PositiveBuckets) > 0 || len(h.NegativeBuckets) > 0 || h.ZeroCount > 0
+
+	if hasNative {
+		if math.IsNaN(h.Sum) {
+			if sumOfBuckets > h.Count {
+				return fmt.Errorf("%d observations found in buckets, but the Count field is %d: %w", sumOfBuckets, h.Count, ErrHistogramCountNotBigEnough)
+			}
+		} else {
+			if sumOfBuckets != h.Count {
+				return fmt.Errorf("%d observations found in buckets, but the Count field is %d: %w", sumOfBuckets, h.Count, ErrHistogramCountMismatch)
+			}
 		}
-	} else {
-		if sumOfBuckets != h.Count {
-			return fmt.Errorf("%d observations found in buckets, but the Count field is %d: %w", sumOfBuckets, h.Count, ErrHistogramCountMismatch)
+	}
+
+	if len(h.ClassicBuckets) > 0 {
+		lastCount := uint64(h.ClassicBuckets[len(h.ClassicBuckets)-1].CumulativeCount)
+		if lastCount != h.Count {
+			return fmt.Errorf("classic buckets total count %d does not match total Count %d", lastCount, h.Count)
 		}
 	}
 
