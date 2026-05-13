@@ -853,6 +853,7 @@ func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) 
 		}
 
 		if h.H != nil && len(h.H.ClassicBuckets) > 0 {
+			t.logger.Info("PROJECTING CLASSIC SERIES", "ref", h.Ref, "buckets", len(h.H.ClassicBuckets))
 			t.registerVirtualLabels(h.Ref, h.H.ClassicBuckets)
 			classicSamples = append(classicSamples, record.RefSample{
 				Ref: makeVirtualSeriesRef(h.Ref, 0),

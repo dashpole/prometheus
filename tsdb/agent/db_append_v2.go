@@ -81,9 +81,9 @@ func (a *appenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64
 	case fh != nil:
 		isStale = value.IsStaleNaN(fh.Sum)
 		// NOTE: always modify pendingFloatHistograms and floatHistogramSeries together
-		// TODO(krajorama,ywwg,bwplotka): Pass ST when available in WAL.
 		a.pendingFloatHistograms = append(a.pendingFloatHistograms, record.RefFloatHistogramSample{
 			Ref: s.ref,
+			ST:  st,
 			T:   t,
 			FH:  fh,
 		})
@@ -91,9 +91,9 @@ func (a *appenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t int64
 	case h != nil:
 		isStale = value.IsStaleNaN(h.Sum)
 		// NOTE: always modify pendingHistograms and histogramSeries together
-		// TODO(krajorama,ywwg,bwplotka): Pass ST when available in WAL.
 		a.pendingHistograms = append(a.pendingHistograms, record.RefHistogramSample{
 			Ref: s.ref,
+			ST:  st,
 			T:   t,
 			H:   h,
 		})
@@ -193,7 +193,7 @@ func (a *appenderV2) bestEffortAppendSTZeroSample(s *memSeries, ls labels.Labels
 			ZeroThreshold: fh.ZeroThreshold,
 			CustomValues:  fh.CustomValues,
 		}
-		a.pendingFloatHistograms = append(a.pendingFloatHistograms, record.RefFloatHistogramSample{Ref: s.ref, T: st, FH: zeroFloatHistogram})
+		a.pendingFloatHistograms = append(a.pendingFloatHistograms, record.RefFloatHistogramSample{Ref: s.ref, ST: st, T: st, FH: zeroFloatHistogram})
 		a.floatHistogramSeries = append(a.floatHistogramSeries, s)
 		a.metrics.totalAppendedSamples.WithLabelValues(sampleMetricTypeHistogram).Inc()
 	case h != nil:
@@ -205,11 +205,11 @@ func (a *appenderV2) bestEffortAppendSTZeroSample(s *memSeries, ls labels.Labels
 			ZeroThreshold: h.ZeroThreshold,
 			CustomValues:  h.CustomValues,
 		}
-		a.pendingHistograms = append(a.pendingHistograms, record.RefHistogramSample{Ref: s.ref, T: st, H: zeroHistogram})
+		a.pendingHistograms = append(a.pendingHistograms, record.RefHistogramSample{Ref: s.ref, ST: st, T: st, H: zeroHistogram})
 		a.histogramSeries = append(a.histogramSeries, s)
 		a.metrics.totalAppendedSamples.WithLabelValues(sampleMetricTypeHistogram).Inc()
 	default:
-		a.pendingSamples = append(a.pendingSamples, record.RefSample{Ref: s.ref, T: st, V: 0})
+		a.pendingSamples = append(a.pendingSamples, record.RefSample{Ref: s.ref, ST: st, T: st, V: 0})
 		a.sampleSeries = append(a.sampleSeries, s)
 		a.metrics.totalAppendedSamples.WithLabelValues(sampleMetricTypeFloat).Inc()
 	}

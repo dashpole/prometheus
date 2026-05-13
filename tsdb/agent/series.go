@@ -32,6 +32,9 @@ type memSeries struct {
 	// Last recorded timestamp. Used by Storage.gc to determine if a series is
 	// stale.
 	lastTs int64
+
+	// st caches the start timestamp for ST storage.
+	st int64
 }
 
 // updateTimestamp obtains the lock on s and will attempt to update lastTs.

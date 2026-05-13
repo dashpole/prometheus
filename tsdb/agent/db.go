@@ -924,6 +924,7 @@ func (a *appender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v flo
 	// NOTE: always modify pendingSamples and sampleSeries together.
 	a.pendingSamples = append(a.pendingSamples, record.RefSample{
 		Ref: series.ref,
+		ST:  series.st,
 		T:   t,
 		V:   v,
 	})
@@ -1073,6 +1074,7 @@ func (a *appender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int
 		// NOTE: always modify pendingHistograms and histogramSeries together
 		a.pendingHistograms = append(a.pendingHistograms, record.RefHistogramSample{
 			Ref: series.ref,
+			ST:  series.st,
 			T:   t,
 			H:   h,
 		})
@@ -1081,6 +1083,7 @@ func (a *appender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int
 		// NOTE: always modify pendingFloatHistograms and floatHistogramSeries together
 		a.pendingFloatHistograms = append(a.pendingFloatHistograms, record.RefFloatHistogramSample{
 			Ref: series.ref,
+			ST:  series.st,
 			T:   t,
 			FH:  fh,
 		})
@@ -1131,12 +1134,14 @@ func (a *appender) AppendHistogramSTZeroSample(ref storage.SeriesRef, l labels.L
 	// to satisfy incorrect TestDBStartTimestampSamplesIngestion test. We are leaving it as-is given the planned removal
 	// of AppenderV1 as per https://github.com/prometheus/prometheus/issues/17632.
 	series.lastTs = st
+	series.st = st // Set cached start timestamp!
 
 	switch {
 	case h != nil:
 		zeroHistogram := &histogram.Histogram{}
 		a.pendingHistograms = append(a.pendingHistograms, record.RefHistogramSample{
 			Ref: series.ref,
+			ST:  st,
 			T:   st,
 			H:   zeroHistogram,
 		})
@@ -1144,6 +1149,7 @@ func (a *appender) AppendHistogramSTZeroSample(ref storage.SeriesRef, l labels.L
 	case fh != nil:
 		a.pendingFloatHistograms = append(a.pendingFloatHistograms, record.RefFloatHistogramSample{
 			Ref: series.ref,
+			ST:  st,
 			T:   st,
 			FH:  &histogram.FloatHistogram{},
 		})
@@ -1180,10 +1186,12 @@ func (a *appender) AppendSTZeroSample(ref storage.SeriesRef, l labels.Labels, t,
 	// to satisfy incorrect TestDBStartTimestampSamplesIngestion test. We are leaving it as-is given the planned removal
 	// of AppenderV1 as per https://github.com/prometheus/prometheus/issues/17632.
 	series.lastTs = st
+	series.st = st // Set cached start timestamp!
 
 	// NOTE: always modify pendingSamples and sampleSeries together.
 	a.pendingSamples = append(a.pendingSamples, record.RefSample{
 		Ref: series.ref,
+		ST:  st,
 		T:   st,
 		V:   0,
 	})

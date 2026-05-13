@@ -81,7 +81,7 @@ func (p internalPrometheus) Run(ctx context.Context, opts sender.Options) error 
 		"--web.listen-address=0.0.0.0:0",
 		fmt.Sprintf("--config.file=%s", configFile),
 		// Set important flags for the full remote write compliance:
-		"--enable-feature=st-storage",
+		"--enable-feature=st-storage,created-timestamp-zero-ingestion",
 	}
 	if p.agentMode {
 		args = append(args, fmt.Sprintf("--storage.agent.path=%v", dir), "--agent")

@@ -532,7 +532,7 @@ func (a *headAppender) AppendSTZeroSample(ref storage.SeriesRef, lset labels.Lab
 	}
 
 	b := a.getCurrentBatch(stFloat, s.ref)
-	b.floats = append(b.floats, record.RefSample{Ref: s.ref, T: st, V: 0.0})
+	b.floats = append(b.floats, record.RefSample{Ref: s.ref, ST: st, T: st, V: 0.0})
 	b.floatSeries = append(b.floatSeries, s)
 	return storage.SeriesRef(s.ref), nil
 }
@@ -960,6 +960,7 @@ func (a *headAppender) AppendHistogramSTZeroSample(ref storage.SeriesRef, lset l
 		b := a.getCurrentBatch(sTyp, s.ref)
 		b.histograms = append(b.histograms, record.RefHistogramSample{
 			Ref: s.ref,
+			ST:  st,
 			T:   st,
 			H:   zeroHistogram,
 		})
@@ -1001,6 +1002,7 @@ func (a *headAppender) AppendHistogramSTZeroSample(ref storage.SeriesRef, lset l
 		b := a.getCurrentBatch(sTyp, s.ref)
 		b.floatHistograms = append(b.floatHistograms, record.RefFloatHistogramSample{
 			Ref: s.ref,
+			ST:  st,
 			T:   st,
 			FH:  zeroFloatHistogram,
 		})
