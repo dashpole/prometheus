@@ -127,33 +127,38 @@ func (h *headIndexReader) PostingsForAllLabelValues(ctx context.Context, name st
 }
 
 func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
-	series := make([]*memSeries, 0, 128)
+	type entry struct {
+		ref  storage.SeriesRef
+		lbls labels.Labels
+	}
+	entries := make([]entry, 0, 128)
+	var builder labels.ScratchBuilder
 
-	notFoundSeriesCount := 0
-	// Fetch all the series only once.
 	for p.Next() {
-		s := h.head.series.getByID(chunks.HeadSeriesRef(p.At()))
-		if s == nil {
-			notFoundSeriesCount++
-		} else {
-			series = append(series, s)
+		ref := p.At()
+		builder.Reset()
+		if err := h.Series(ref, &builder, nil); err != nil {
+			h.head.logger.Debug("Looked up series not found during SortedPostings", "ref", ref, "err", err)
+			continue
 		}
+		entries = append(entries, entry{
+			ref:  ref,
+			lbls: builder.Labels(),
+		})
 	}
-	if notFoundSeriesCount > 0 {
-		h.head.logger.Debug("Looked up series not found", "count", notFoundSeriesCount)
-	}
+
 	if err := p.Err(); err != nil {
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
 	}
 
-	slices.SortFunc(series, func(a, b *memSeries) int {
-		return labels.Compare(a.labels(), b.labels())
+	slices.SortFunc(entries, func(a, b entry) int {
+		return labels.Compare(a.lbls, b.lbls)
 	})
 
 	// Convert back to list.
-	ep := make([]storage.SeriesRef, 0, len(series))
-	for _, p := range series {
-		ep = append(ep, storage.SeriesRef(p.ref))
+	ep := make([]storage.SeriesRef, 0, len(entries))
+	for _, e := range entries {
+		ep = append(ep, e.ref)
 	}
 	return index.NewListPostings(ep)
 }
@@ -169,7 +174,13 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 	notFoundSeriesCount := 0
 
 	for p.Next() {
-		s := h.head.series.getByID(chunks.HeadSeriesRef(p.At()))
+		ref := p.At()
+		isVirtual := uint64(ref)&virtualSeriesMask != 0
+		baseRef := ref
+		if isVirtual {
+			baseRef = ref & 0xFFFFFFFF
+		}
+		s := h.head.series.getByID(chunks.HeadSeriesRef(baseRef))
 		if s == nil {
 			notFoundSeriesCount++
 			continue
@@ -180,7 +191,7 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 			continue
 		}
 
-		out = append(out, storage.SeriesRef(s.ref))
+		out = append(out, ref)
 	}
 	if notFoundSeriesCount > 0 {
 		h.head.logger.Debug("Looked up series not found", "count", notFoundSeriesCount)
@@ -197,13 +208,7 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 	var info virtualSeriesInfo
 
 	if isVirtual {
-		h.head.virtualSeriesMtx.RLock()
-		var ok bool
-		info, ok = h.head.virtualSeriesMap[ref]
-		h.head.virtualSeriesMtx.RUnlock()
-		if !ok {
-			return storage.ErrNotFound
-		}
+		info = unpackVirtualSeriesRef(ref)
 		baseRef = info.baseRef
 	} else {
 		baseRef = ref
@@ -220,7 +225,15 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 		lb := labels.NewBuilder(s.labels())
 		lb.Set("__name__", baseName+"_"+info.aliasType)
 		if info.aliasType == "bucket" {
-			leStr := labels.FormatOpenMetricsFloat(info.upperBound)
+			var upperBound float64
+			s.Lock()
+			if s.lastHistogramValue != nil && info.bucketIdx < len(s.lastHistogramValue.ClassicBuckets) {
+				upperBound = s.lastHistogramValue.ClassicBuckets[info.bucketIdx].UpperBound
+			} else if s.lastFloatHistogramValue != nil && info.bucketIdx < len(s.lastFloatHistogramValue.ClassicBuckets) {
+				upperBound = s.lastFloatHistogramValue.ClassicBuckets[info.bucketIdx].UpperBound
+			}
+			s.Unlock()
+			leStr := labels.FormatOpenMetricsFloat(upperBound)
 			lb.Set("le", leStr)
 		}
 		builder.Assign(lb.Labels())
@@ -558,15 +571,7 @@ func (h *headChunkReader) chunk(meta chunks.Meta, copyLastChunk bool) (chunkenc.
 	var info virtualSeriesInfo
 
 	if isVirtual {
-		h.head.virtualSeriesMtx.RLock()
-		var ok bool
-		var inf virtualSeriesInfo
-		inf, ok = h.head.virtualSeriesMap[storage.SeriesRef(sid)]
-		h.head.virtualSeriesMtx.RUnlock()
-		if !ok {
-			return nil, 0, storage.ErrNotFound
-		}
-		info = inf
+		info = unpackVirtualSeriesRef(storage.SeriesRef(sid))
 		baseRef = chunks.HeadSeriesRef(info.baseRef)
 	} else {
 		baseRef = sid
@@ -975,10 +980,8 @@ func (it *virtualIterator) projectValue() (int64, float64, error) {
 	case "count":
 		return t, fh.Count, nil
 	case "bucket":
-		for _, cb := range fh.ClassicBuckets {
-			if cb.UpperBound == it.info.upperBound {
-				return t, cb.CumulativeCount, nil
-			}
+		if it.info.bucketIdx < len(fh.ClassicBuckets) {
+			return t, fh.ClassicBuckets[it.info.bucketIdx].CumulativeCount, nil
 		}
 		return t, 0, nil
 	}

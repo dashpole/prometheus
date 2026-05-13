@@ -1194,6 +1194,8 @@ func (it *histogramIterator) Reset(b []byte) {
 
 	it.pBucketsDelta = it.pBucketsDelta[:0]
 	it.nBucketsDelta = it.nBucketsDelta[:0]
+	it.cBuckets = it.cBuckets[:0]
+	it.cBucketsDelta = it.cBucketsDelta[:0]
 
 	it.sum = 0
 	it.leading = 0
@@ -1213,7 +1215,7 @@ func (it *histogramIterator) Next() ValueType {
 		// counter reset info at chunk level, hence we discard it here.
 		schema, zeroThreshold, posSpans, negSpans, customValues, classicValues, err := readHistogramChunkLayout(&it.br)
 		if err != nil {
-			it.err = err
+			it.err = fmt.Errorf("readHistogramChunkLayout: %w", err)
 			return ValNone
 		}
 
@@ -1248,28 +1250,28 @@ func (it *histogramIterator) Next() ValueType {
 		// Now read the actual data.
 		t, err := readVarbitInt(&it.br)
 		if err != nil {
-			it.err = err
+			it.err = fmt.Errorf("readVarbitInt timestamp: %w", err)
 			return ValNone
 		}
 		it.t = t
 
 		cnt, err := readVarbitUint(&it.br)
 		if err != nil {
-			it.err = err
+			it.err = fmt.Errorf("readVarbitUint count: %w", err)
 			return ValNone
 		}
 		it.cnt = cnt
 
 		zcnt, err := readVarbitUint(&it.br)
 		if err != nil {
-			it.err = err
+			it.err = fmt.Errorf("readVarbitUint zeroCount: %w", err)
 			return ValNone
 		}
 		it.zCnt = zcnt
 
 		sum, err := it.br.readBits(64)
 		if err != nil {
-			it.err = err
+			it.err = fmt.Errorf("readBits sum: %w", err)
 			return ValNone
 		}
 		it.sum = math.Float64frombits(sum)
@@ -1278,7 +1280,7 @@ func (it *histogramIterator) Next() ValueType {
 		for i := range it.pBuckets {
 			v, err := readVarbitInt(&it.br)
 			if err != nil {
-				it.err = err
+				it.err = fmt.Errorf("first read pBuckets[%d/%d]: %w", i, len(it.pBuckets), err)
 				return ValNone
 			}
 			it.pBuckets[i] = v
@@ -1289,7 +1291,7 @@ func (it *histogramIterator) Next() ValueType {
 		for i := range it.nBuckets {
 			v, err := readVarbitInt(&it.br)
 			if err != nil {
-				it.err = err
+				it.err = fmt.Errorf("first read nBuckets[%d/%d]: %w", i, len(it.nBuckets), err)
 				return ValNone
 			}
 			it.nBuckets[i] = v
@@ -1300,7 +1302,7 @@ func (it *histogramIterator) Next() ValueType {
 		for i := range it.cBuckets {
 			v, err := readVarbitInt(&it.br)
 			if err != nil {
-				it.err = err
+				it.err = fmt.Errorf("first read cBuckets[%d/%d]: %w", i, len(it.cBuckets), err)
 				return ValNone
 			}
 			it.cBuckets[i] = v
@@ -1374,7 +1376,7 @@ func (it *histogramIterator) Next() ValueType {
 
 	tDod, err := readVarbitInt(&it.br)
 	if err != nil {
-		it.err = err
+		it.err = fmt.Errorf("subsequent read tDod (numRead=%d, numTotal=%d): %w", it.numRead, it.numTotal, err)
 		return ValNone
 	}
 	it.tDelta += tDod
@@ -1382,7 +1384,7 @@ func (it *histogramIterator) Next() ValueType {
 
 	cntDod, err := readVarbitInt(&it.br)
 	if err != nil {
-		it.err = err
+		it.err = fmt.Errorf("subsequent read cntDod (numRead=%d, numTotal=%d): %w", it.numRead, it.numTotal, err)
 		return ValNone
 	}
 	it.cntDelta += cntDod
@@ -1390,7 +1392,7 @@ func (it *histogramIterator) Next() ValueType {
 
 	zcntDod, err := readVarbitInt(&it.br)
 	if err != nil {
-		it.err = err
+		it.err = fmt.Errorf("subsequent read zcntDod (numRead=%d, numTotal=%d): %w", it.numRead, it.numTotal, err)
 		return ValNone
 	}
 	it.zCntDelta += zcntDod

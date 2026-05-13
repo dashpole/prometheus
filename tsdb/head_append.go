@@ -2317,46 +2317,30 @@ func (a *headAppenderBase) addClassicPostings(s *memSeries, classicBuckets []his
 
 	h := a.head
 
-	h.virtualSeriesMtx.Lock()
-	defer h.virtualSeriesMtx.Unlock()
-
 	// 1. Add _count virtual postings
 	countLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_count").Labels()
 	if h.series.getByHash(countLabels.Hash(), countLabels) == nil {
-		countID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-		h.virtualSeriesMap[storage.SeriesRef(countID)] = virtualSeriesInfo{
-			baseRef:   storage.SeriesRef(s.ref),
-			aliasType: "count",
-		}
-		h.postings.Add(storage.SeriesRef(countID), countLabels)
+		countID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 0)
+		h.postings.Add(countID, countLabels)
 	}
 
 	// 2. Add _sum virtual postings
 	sumLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_sum").Labels()
 	if h.series.getByHash(sumLabels.Hash(), sumLabels) == nil {
-		sumID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-		h.virtualSeriesMap[storage.SeriesRef(sumID)] = virtualSeriesInfo{
-			baseRef:   storage.SeriesRef(s.ref),
-			aliasType: "sum",
-		}
-		h.postings.Add(storage.SeriesRef(sumID), sumLabels)
+		sumID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 1)
+		h.postings.Add(sumID, sumLabels)
 	}
 
 	// 3. Add _bucket virtual postings for each le
-	for _, cb := range classicBuckets {
+	for idx, cb := range classicBuckets {
 		leStr := labels.FormatOpenMetricsFloat(cb.UpperBound)
 		bucketLabels := labels.NewBuilder(s.lset).
 			Set("__name__", baseName+"_bucket").
 			Set("le", leStr).
 			Labels()
 		if h.series.getByHash(bucketLabels.Hash(), bucketLabels) == nil {
-			bucketID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
-			h.virtualSeriesMap[storage.SeriesRef(bucketID)] = virtualSeriesInfo{
-				baseRef:    storage.SeriesRef(s.ref),
-				aliasType:  "bucket",
-				upperBound: cb.UpperBound,
-			}
-			h.postings.Add(storage.SeriesRef(bucketID), bucketLabels)
+			bucketID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), uint64(2+idx))
+			h.postings.Add(bucketID, bucketLabels)
 		}
 	}
 

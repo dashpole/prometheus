@@ -70,9 +70,26 @@ var (
 const virtualSeriesMask uint64 = 1 << 39
 
 type virtualSeriesInfo struct {
-	baseRef    storage.SeriesRef
-	aliasType  string  // "bucket", "sum", "count"
-	upperBound float64 // Only used for "bucket"
+	baseRef   storage.SeriesRef
+	aliasType string // "bucket", "sum", "count"
+	bucketIdx int    // Only used for "bucket"
+}
+
+func makeVirtualSeriesRef(baseRef storage.SeriesRef, aliasTypeID uint64) storage.SeriesRef {
+	return baseRef | storage.SeriesRef(aliasTypeID<<32) | storage.SeriesRef(virtualSeriesMask)
+}
+
+func unpackVirtualSeriesRef(ref storage.SeriesRef) virtualSeriesInfo {
+	baseRef := ref & 0xFFFFFFFF
+	aliasTypeID := (uint64(ref) >> 32) & 0x7F
+	switch aliasTypeID {
+	case 0:
+		return virtualSeriesInfo{baseRef: baseRef, aliasType: "count"}
+	case 1:
+		return virtualSeriesInfo{baseRef: baseRef, aliasType: "sum"}
+	default:
+		return virtualSeriesInfo{baseRef: baseRef, aliasType: "bucket", bucketIdx: int(aliasTypeID - 2)}
+	}
 }
 
 // Head handles reads and writes of time series data within a time window.
@@ -158,10 +175,6 @@ type Head struct {
 
 	memTruncationInProcess atomic.Bool
 	memTruncationCallBack  func() // For testing purposes.
-
-	virtualSeriesMtx    sync.RWMutex
-	virtualSeriesMap    map[storage.SeriesRef]virtualSeriesInfo
-	virtualSeriesLastID atomic.Uint64
 }
 
 type ExemplarStorage interface {
@@ -316,10 +329,9 @@ func NewHead(r prometheus.Registerer, l *slog.Logger, wal, wbl *wlog.WL, opts *H
 				return &memChunk{}
 			},
 		},
-		stats:            stats,
-		reg:              r,
-		seriesStateQuit:  make(chan struct{}),
-		virtualSeriesMap: make(map[storage.SeriesRef]virtualSeriesInfo),
+		stats:           stats,
+		reg:             r,
+		seriesStateQuit: make(chan struct{}),
 	}
 	if err := h.resetInMemoryState(); err != nil {
 		return nil, err

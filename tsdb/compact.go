@@ -23,12 +23,14 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/promslog"
 
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -867,9 +869,10 @@ func (DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compact
 	}
 
 	var (
-		ref      = storage.SeriesRef(0)
-		chks     []chunks.Meta
-		chksIter chunks.Iterator
+		ref              = storage.SeriesRef(0)
+		chks             []chunks.Meta
+		chksIter         chunks.Iterator
+		writtenChunksMap = make(map[uint64][]chunks.Meta)
 	)
 
 	set := sets[0]
@@ -896,7 +899,7 @@ func (DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compact
 			chks = append(chks, chksIter.At())
 		}
 		if err := chksIter.Err(); err != nil {
-			return fmt.Errorf("chunk iter: %w", err)
+			return fmt.Errorf("series %s: chunk iter: %w", s.Labels().String(), err)
 		}
 
 		// Skip series with all deleted chunks.
@@ -904,9 +907,33 @@ func (DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compact
 			continue
 		}
 
+		isVirtual := false
+		baseLabels := getBaseLabels(s.Labels())
+		var baseChks []chunks.Meta
+		if baseLabels.Hash() != s.Labels().Hash() {
+			var ok bool
+			baseChks, ok = writtenChunksMap[baseLabels.Hash()]
+			if ok {
+				isVirtual = true
+			}
+		}
+
+		if isVirtual {
+			if err := indexw.AddSeries(ref, s.Labels(), baseChks...); err != nil {
+				return fmt.Errorf("add series: %w", err)
+			}
+			meta.Stats.NumSeries++
+			ref++
+			continue
+		}
+
 		if err := chunkw.WriteChunks(chks...); err != nil {
 			return fmt.Errorf("write chunks: %w", err)
 		}
+		chksCopy := make([]chunks.Meta, len(chks))
+		copy(chksCopy, chks)
+		writtenChunksMap[s.Labels().Hash()] = chksCopy
+
 		if err := indexw.AddSeries(ref, s.Labels(), chks...); err != nil {
 			return fmt.Errorf("add series: %w", err)
 		}
@@ -925,6 +952,9 @@ func (DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compact
 		}
 
 		for _, chk := range chks {
+			if chk.Chunk.Encoding() == chunkenc.EncHistogram || chk.Chunk.Encoding() == chunkenc.EncFloatHistogram {
+				continue
+			}
 			if err := chunkPool.Put(chk.Chunk); err != nil {
 				return fmt.Errorf("put chunk: %w", err)
 			}
@@ -936,4 +966,21 @@ func (DefaultBlockPopulator) PopulateBlock(ctx context.Context, metrics *Compact
 	}
 
 	return nil
+}
+
+func getBaseLabels(virtualLabels labels.Labels) labels.Labels {
+	mName := virtualLabels.Get(labels.MetricName)
+	if baseName, ok := strings.CutSuffix(mName, "_count"); ok {
+		return labels.NewBuilder(virtualLabels).Set(labels.MetricName, baseName).Labels()
+	}
+	if baseName, ok := strings.CutSuffix(mName, "_sum"); ok {
+		return labels.NewBuilder(virtualLabels).Set(labels.MetricName, baseName).Labels()
+	}
+	if baseName, ok := strings.CutSuffix(mName, "_bucket"); ok {
+		return labels.NewBuilder(virtualLabels).
+			Set(labels.MetricName, baseName).
+			Del("le").
+			Labels()
+	}
+	return virtualLabels
 }

@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"unsafe"
 
 	"github.com/prometheus/prometheus/model/labels"
@@ -431,7 +432,7 @@ func (w *Writer) writeMeta() error {
 }
 
 // AddSeries adds the series one at a time along with its chunks.
-func (w *Writer) AddSeries(ref storage.SeriesRef, lset labels.Labels, chunks ...chunks.Meta) error {
+func (w *Writer) AddSeries(ref storage.SeriesRef, lset labels.Labels, chks ...chunks.Meta) error {
 	if err := w.ensureStage(idxStageSeries); err != nil {
 		return err
 	}
@@ -443,10 +444,19 @@ func (w *Writer) AddSeries(ref storage.SeriesRef, lset labels.Labels, chunks ...
 		return fmt.Errorf("series with reference greater than %d already added", ref)
 	}
 
-	lastChunkRef := w.lastChunkRef
+	var lastChunkRef chunks.ChunkRef
+	isVirtual := false
+	mName := lset.Get(labels.MetricName)
+	if strings.HasSuffix(mName, "_count") || strings.HasSuffix(mName, "_sum") || strings.HasSuffix(mName, "_bucket") {
+		isVirtual = true
+	}
+
+	if !isVirtual {
+		lastChunkRef = w.lastChunkRef
+	}
 	lastMaxT := int64(0)
-	for ix, c := range chunks {
-		if c.Ref < lastChunkRef {
+	for ix, c := range chks {
+		if (ix > 0 || !isVirtual) && c.Ref < lastChunkRef {
 			return fmt.Errorf("unsorted chunk reference: %d, previous: %d", c.Ref, lastChunkRef)
 		}
 		lastChunkRef = c.Ref
@@ -491,17 +501,17 @@ func (w *Writer) AddSeries(ref storage.SeriesRef, lset labels.Labels, chunks ...
 		return err
 	}
 
-	w.buf2.PutUvarint(len(chunks))
+	w.buf2.PutUvarint(len(chks))
 
-	if len(chunks) > 0 {
-		c := chunks[0]
+	if len(chks) > 0 {
+		c := chks[0]
 		w.buf2.PutVarint64(c.MinTime)
 		w.buf2.PutUvarint64(uint64(c.MaxTime - c.MinTime))
 		w.buf2.PutUvarint64(uint64(c.Ref))
 		t0 := c.MaxTime
 		ref0 := int64(c.Ref)
 
-		for _, c := range chunks[1:] {
+		for _, c := range chks[1:] {
 			w.buf2.PutUvarint64(uint64(c.MinTime - t0))
 			w.buf2.PutUvarint64(uint64(c.MaxTime - c.MinTime))
 			t0 = c.MaxTime
@@ -522,7 +532,9 @@ func (w *Writer) AddSeries(ref storage.SeriesRef, lset labels.Labels, chunks ...
 
 	w.lastSeries.CopyFrom(lset)
 	w.lastSeriesRef = ref
-	w.lastChunkRef = lastChunkRef
+	if !isVirtual {
+		w.lastChunkRef = lastChunkRef
+	}
 
 	return nil
 }

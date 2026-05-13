@@ -14,6 +14,7 @@
 package chunkenc
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
@@ -121,12 +122,12 @@ func readHistogramChunkLayoutCustomBounds(b *bstreamReader) ([]float64, error) {
 	var customValues []float64
 	num, err := readVarbitUint(b)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("readVarbitUint: %w", err)
 	}
 	for i := 0; i < int(num); i++ {
 		bound, err := readCustomBound(b)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("readCustomBound[%d/%d]: %w", i, num, err)
 		}
 
 		customValues = append(customValues, bound)

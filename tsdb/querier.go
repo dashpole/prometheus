@@ -19,11 +19,14 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
+	"strings"
 
 	"github.com/oklog/ulid/v2"
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
@@ -774,11 +777,36 @@ type blockSeriesEntry struct {
 }
 
 func (s *blockSeriesEntry) Iterator(it chunkenc.Iterator) chunkenc.Iterator {
+	mName := s.labels.Get(labels.MetricName)
+	var aliasType string
+	var upperBound float64
+	switch {
+	case strings.HasSuffix(mName, "_count"):
+		aliasType = "count"
+	case strings.HasSuffix(mName, "_sum"):
+		aliasType = "sum"
+	case strings.HasSuffix(mName, "_bucket"):
+		aliasType = "bucket"
+		var err error
+		upperBound, err = strconv.ParseFloat(s.labels.Get("le"), 64)
+		if err != nil {
+			upperBound = math.NaN()
+		}
+	}
+
 	pi, ok := it.(*populateWithDelSeriesIterator)
 	if !ok {
 		pi = &populateWithDelSeriesIterator{}
 	}
 	pi.reset(s.blockID, s.chunks, s.chks, s.intervals)
+
+	if aliasType != "" {
+		return &blockVirtualIterator{
+			base:       pi,
+			aliasType:  aliasType,
+			upperBound: upperBound,
+		}
+	}
 	return pi
 }
 
@@ -1345,3 +1373,85 @@ func (cr nopChunkReader) ChunkOrIterable(chunks.Meta) (chunkenc.Chunk, chunkenc.
 }
 
 func (nopChunkReader) Close() error { return nil }
+
+type blockVirtualIterator struct {
+	base       chunkenc.Iterator
+	aliasType  string
+	upperBound float64
+	err        error
+}
+
+func (it *blockVirtualIterator) Next() chunkenc.ValueType {
+	vt := it.base.Next()
+	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+		return chunkenc.ValFloat
+	}
+	return vt
+}
+
+func (it *blockVirtualIterator) Seek(t int64) chunkenc.ValueType {
+	vt := it.base.Seek(t)
+	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+		return chunkenc.ValFloat
+	}
+	return vt
+}
+
+func (it *blockVirtualIterator) At() (int64, float64) {
+	t, v, err := it.projectValue()
+	if err != nil {
+		it.err = err
+		return t, 0
+	}
+	return t, v
+}
+
+func (it *blockVirtualIterator) AtT() int64 {
+	return it.base.AtT()
+}
+
+func (it *blockVirtualIterator) AtFloat() float64 {
+	_, v := it.At()
+	return v
+}
+
+func (it *blockVirtualIterator) AtST() int64 {
+	return it.base.AtST()
+}
+
+func (it *blockVirtualIterator) Err() error {
+	if it.err != nil {
+		return it.err
+	}
+	return it.base.Err()
+}
+
+func (*blockVirtualIterator) AtHistogram(*histogram.Histogram) (int64, *histogram.Histogram) {
+	panic("cannot call AtHistogram on virtual float iterator")
+}
+
+func (*blockVirtualIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
+	panic("cannot call AtFloatHistogram on virtual float iterator")
+}
+
+func (it *blockVirtualIterator) projectValue() (int64, float64, error) {
+	t, fh := it.base.AtFloatHistogram(nil)
+	if value.IsStaleNaN(fh.Sum) {
+		return t, fh.Sum, nil
+	}
+
+	switch it.aliasType {
+	case "sum":
+		return t, fh.Sum, nil
+	case "count":
+		return t, fh.Count, nil
+	case "bucket":
+		for _, cb := range fh.ClassicBuckets {
+			if cb.UpperBound == it.upperBound {
+				return t, cb.CumulativeCount, nil
+			}
+		}
+		return t, 0, nil
+	}
+	return t, 0, fmt.Errorf("unknown alias type: %s", it.aliasType)
+}
