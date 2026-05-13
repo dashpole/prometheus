@@ -1522,3 +1522,63 @@ func TestFloatHistogramIteratorReduceSchema(t *testing.T) {
 		})
 	}
 }
+
+func TestFloatHistogramChunkCombined(t *testing.T) {
+	c := NewFloatHistogramChunk()
+	var exp []floatResult
+
+	app, err := c.Appender()
+	require.NoError(t, err)
+
+	ts := int64(1234567890)
+	h := &histogram.FloatHistogram{
+		Count:         15,
+		ZeroCount:     2,
+		Sum:           18.4,
+		ZeroThreshold: 1e-100,
+		Schema:        1,
+		PositiveSpans: []histogram.Span{
+			{Offset: 0, Length: 2},
+		},
+		PositiveBuckets: []float64{1.5, 2.5},
+		ClassicBuckets: []histogram.ClassicBucket{
+			{UpperBound: 1.0, CumulativeCount: 5.5},
+			{UpperBound: 2.5, CumulativeCount: 10.5},
+			{UpperBound: 5.0, CumulativeCount: 15.5},
+		},
+	}
+	chk, _, app, err := app.AppendFloatHistogram(nil, 0, ts, h, false)
+	require.NoError(t, err)
+	require.Nil(t, chk)
+	exp = append(exp, floatResult{t: ts, h: h})
+
+	// Add subsequent sample
+	ts += 16
+	h = h.Copy()
+	h.Count = 30
+	h.ZeroCount++
+	h.Sum = 24.4
+	h.PositiveBuckets = []float64{3.5, 4.5}
+	h.ClassicBuckets = []histogram.ClassicBucket{
+		{UpperBound: 1.0, CumulativeCount: 10.5},
+		{UpperBound: 2.5, CumulativeCount: 20.5},
+		{UpperBound: 5.0, CumulativeCount: 30.5},
+	}
+	chk, _, _, err = app.AppendFloatHistogram(nil, 0, ts, h, false)
+	require.NoError(t, err)
+	require.Nil(t, chk)
+	hExp := h.Copy()
+	hExp.CounterResetHint = histogram.NotCounterReset
+	exp = append(exp, floatResult{t: ts, h: hExp})
+
+	// Read back and verify
+	it := c.Iterator(nil)
+	require.NoError(t, it.Err())
+	var act []floatResult
+	for it.Next() == ValFloatHistogram {
+		fts, fh := it.AtFloatHistogram(nil)
+		act = append(act, floatResult{t: fts, h: fh})
+	}
+	require.NoError(t, it.Err())
+	require.Equal(t, exp, act)
+}

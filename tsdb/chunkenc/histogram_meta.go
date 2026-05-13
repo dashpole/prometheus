@@ -22,6 +22,7 @@ import (
 func writeHistogramChunkLayout(
 	b *bstream, schema int32, zeroThreshold float64,
 	positiveSpans, negativeSpans []histogram.Span, customValues []float64,
+	classicValues []float64,
 ) {
 	putZeroThreshold(b, zeroThreshold)
 	putVarbitInt(b, int64(schema))
@@ -30,43 +31,50 @@ func writeHistogramChunkLayout(
 	if histogram.IsCustomBucketsSchema(schema) {
 		putHistogramChunkLayoutCustomBounds(b, customValues)
 	}
+	putHistogramChunkLayoutCustomBounds(b, classicValues)
 }
 
 func readHistogramChunkLayout(b *bstreamReader) (
 	schema int32, zeroThreshold float64,
 	positiveSpans, negativeSpans []histogram.Span,
 	customValues []float64,
+	classicValues []float64,
 	err error,
 ) {
 	zeroThreshold, err = readZeroThreshold(b)
 	if err != nil {
-		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 	}
 
 	v, err := readVarbitInt(b)
 	if err != nil {
-		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 	}
 	schema = int32(v)
 
 	positiveSpans, err = readHistogramChunkLayoutSpans(b)
 	if err != nil {
-		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 	}
 
 	negativeSpans, err = readHistogramChunkLayoutSpans(b)
 	if err != nil {
-		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 	}
 
 	if histogram.IsCustomBucketsSchema(schema) {
 		customValues, err = readHistogramChunkLayoutCustomBounds(b)
 		if err != nil {
-			return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+			return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 		}
 	}
 
-	return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, err
+	classicValues, err = readHistogramChunkLayoutCustomBounds(b)
+	if err != nil {
+		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
+	}
+
+	return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
 }
 
 func putHistogramChunkLayoutSpans(b *bstream, spans []histogram.Span) {

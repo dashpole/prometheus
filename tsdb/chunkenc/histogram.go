@@ -125,6 +125,7 @@ func (c *HistogramChunk) Appender() (Appender, error) {
 		pSpans:        it.pSpans,
 		nSpans:        it.nSpans,
 		customValues:  it.customValues,
+		classicValues: it.classicValues,
 		t:             it.t,
 		cnt:           it.cnt,
 		zCnt:          it.zCnt,
@@ -135,6 +136,8 @@ func (c *HistogramChunk) Appender() (Appender, error) {
 		nBuckets:      it.nBuckets,
 		pBucketsDelta: it.pBucketsDelta,
 		nBucketsDelta: it.nBucketsDelta,
+		cBuckets:      it.cBuckets,
+		cBucketsDelta: it.cBucketsDelta,
 
 		sum:      it.sum,
 		leading:  it.leading,
@@ -187,7 +190,8 @@ type HistogramAppender struct {
 	zThreshold     float64
 	pSpans, nSpans []histogram.Span
 	// customValues is read only after the first sample is appended.
-	customValues []float64
+	customValues  []float64
+	classicValues []float64
 
 	// Although we intend to start new chunks on counter resets, we still
 	// have to handle negative deltas for gauge histograms. Therefore, even
@@ -198,6 +202,8 @@ type HistogramAppender struct {
 	tDelta, cntDelta, zCntDelta  int64
 	pBuckets, nBuckets           []int64
 	pBucketsDelta, nBucketsDelta []int64
+	cBuckets                     []int64
+	cBucketsDelta                []int64
 
 	// The sum is Gorilla xor encoded.
 	sum      float64
@@ -559,7 +565,14 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 	if num == 0 {
 		// The first append gets the privilege to dictate the layout
 		// but it's also responsible for encoding it into the chunk!
-		writeHistogramChunkLayout(a.b, h.Schema, h.ZeroThreshold, h.PositiveSpans, h.NegativeSpans, h.CustomValues)
+		var classicBounds []float64
+		if len(h.ClassicBuckets) > 0 {
+			classicBounds = make([]float64, len(h.ClassicBuckets))
+			for i, cb := range h.ClassicBuckets {
+				classicBounds[i] = cb.UpperBound
+			}
+		}
+		writeHistogramChunkLayout(a.b, h.Schema, h.ZeroThreshold, h.PositiveSpans, h.NegativeSpans, h.CustomValues, classicBounds)
 		a.schema = h.Schema
 		a.zThreshold = h.ZeroThreshold
 
@@ -580,6 +593,16 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 			copy(a.customValues, h.CustomValues)
 		} else {
 			a.customValues = nil
+		}
+		if len(h.ClassicBuckets) > 0 {
+			a.classicValues = make([]float64, len(h.ClassicBuckets))
+			copy(a.classicValues, classicBounds)
+			a.cBuckets = make([]int64, len(h.ClassicBuckets))
+			a.cBucketsDelta = make([]int64, len(h.ClassicBuckets))
+		} else {
+			a.classicValues = nil
+			a.cBuckets = nil
+			a.cBucketsDelta = nil
 		}
 
 		numPBuckets, numNBuckets := countSpans(h.PositiveSpans), countSpans(h.NegativeSpans)
@@ -608,6 +631,11 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 		}
 		for _, b := range h.NegativeBuckets {
 			putVarbitInt(a.b, b)
+		}
+		for i, cb := range h.ClassicBuckets {
+			val := int64(cb.CumulativeCount)
+			putVarbitInt(a.b, val)
+			a.cBuckets[i] = val
 		}
 	} else {
 		// The case for the 2nd sample with single deltas is implicitly
@@ -644,6 +672,13 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 			putVarbitInt(a.b, dod)
 			a.nBucketsDelta[i] = delta
 		}
+		for i, cb := range h.ClassicBuckets {
+			val := int64(cb.CumulativeCount)
+			delta := val - a.cBuckets[i]
+			dod := delta - a.cBucketsDelta[i]
+			putVarbitInt(a.b, dod)
+			a.cBucketsDelta[i] = delta
+		}
 	}
 
 	binary.BigEndian.PutUint16(a.b.bytes(), num+1)
@@ -657,6 +692,9 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 
 	copy(a.pBuckets, h.PositiveBuckets)
 	copy(a.nBuckets, h.NegativeBuckets)
+	for i, cb := range h.ClassicBuckets {
+		a.cBuckets[i] = int64(cb.CumulativeCount)
+	}
 	// Note that the bucket deltas were already updated above.
 	a.sum = h.Sum
 }
@@ -876,6 +914,7 @@ type histogramIterator struct {
 	zThreshold     float64
 	pSpans, nSpans []histogram.Span
 	customValues   []float64
+	classicValues  []float64
 
 	// For the fields that are tracked as deltas and ultimately dod's.
 	t                            int64
@@ -884,6 +923,8 @@ type histogramIterator struct {
 	pBuckets, nBuckets           []int64   // Delta between buckets.
 	pFloatBuckets, nFloatBuckets []float64 // Absolute counts.
 	pBucketsDelta, nBucketsDelta []int64
+	cBuckets                     []int64
+	cBucketsDelta                []int64
 
 	// The sum is Gorilla xor encoded.
 	sum      float64
@@ -921,6 +962,16 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	}
 	if h == nil {
 		it.atHistogramCalled = true
+		var classicBuckets []histogram.ClassicBucket
+		if len(it.classicValues) > 0 {
+			classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
+			for idx, bound := range it.classicValues {
+				classicBuckets[idx] = histogram.ClassicBucket{
+					UpperBound:      bound,
+					CumulativeCount: float64(it.cBuckets[idx]),
+				}
+			}
+		}
 		h = &histogram.Histogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
 			Count:            it.cnt,
@@ -933,6 +984,7 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 			PositiveBuckets:  it.pBuckets,
 			NegativeBuckets:  it.nBuckets,
 			CustomValues:     it.customValues,
+			ClassicBuckets:   classicBuckets,
 		}
 		if h.Schema > histogram.ExponentialSchemaMax && h.Schema <= histogram.ExponentialSchemaMaxReserved {
 			// This is a very slow path, but it should only happen if the
@@ -972,6 +1024,14 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 
 	// Custom values are interned. The single copy is here in the iterator.
 	h.CustomValues = it.customValues
+
+	h.ClassicBuckets = resize(h.ClassicBuckets, len(it.classicValues))
+	for idx, bound := range it.classicValues {
+		h.ClassicBuckets[idx] = histogram.ClassicBucket{
+			UpperBound:      bound,
+			CumulativeCount: float64(it.cBuckets[idx]),
+		}
+	}
 
 	if h.Schema > histogram.ExponentialSchemaMax && h.Schema <= histogram.ExponentialSchemaMaxReserved {
 		// This is a very slow path, but it should only happen if the
@@ -1132,7 +1192,7 @@ func (it *histogramIterator) Next() ValueType {
 		// The first read is responsible for reading the chunk layout
 		// and for initializing fields that depend on it. We give
 		// counter reset info at chunk level, hence we discard it here.
-		schema, zeroThreshold, posSpans, negSpans, customValues, err := readHistogramChunkLayout(&it.br)
+		schema, zeroThreshold, posSpans, negSpans, customValues, classicValues, err := readHistogramChunkLayout(&it.br)
 		if err != nil {
 			it.err = err
 			return ValNone
@@ -1147,6 +1207,7 @@ func (it *histogramIterator) Next() ValueType {
 		it.zThreshold = zeroThreshold
 		it.pSpans, it.nSpans = posSpans, negSpans
 		it.customValues = customValues
+		it.classicValues = classicValues
 		numPBuckets, numNBuckets := countSpans(posSpans), countSpans(negSpans)
 		// The code below recycles existing slices in case this iterator
 		// was reset and already has slices of a sufficient capacity.
@@ -1159,6 +1220,10 @@ func (it *histogramIterator) Next() ValueType {
 			it.nBuckets = append(it.nBuckets, make([]int64, numNBuckets)...)
 			it.nBucketsDelta = append(it.nBucketsDelta, make([]int64, numNBuckets)...)
 			it.nFloatBuckets = append(it.nFloatBuckets, make([]float64, numNBuckets)...)
+		}
+		if len(classicValues) > 0 {
+			it.cBuckets = append(it.cBuckets, make([]int64, len(classicValues))...)
+			it.cBucketsDelta = append(it.cBucketsDelta, make([]int64, len(classicValues))...)
 		}
 
 		// Now read the actual data.
@@ -1213,6 +1278,15 @@ func (it *histogramIterator) Next() ValueType {
 			it.nFloatBuckets[i] = float64(current)
 		}
 
+		for i := range it.cBuckets {
+			v, err := readVarbitInt(&it.br)
+			if err != nil {
+				it.err = err
+				return ValNone
+			}
+			it.cBuckets[i] = v
+		}
+
 		it.numRead++
 		return ValHistogram
 	}
@@ -1254,6 +1328,13 @@ func (it *histogramIterator) Next() ValueType {
 			it.nBuckets = newBuckets
 		} else {
 			it.nBuckets = nil
+		}
+		if len(it.cBuckets) > 0 {
+			newBuckets := make([]int64, len(it.cBuckets))
+			copy(newBuckets, it.cBuckets)
+			it.cBuckets = newBuckets
+		} else {
+			it.cBuckets = nil
 		}
 	}
 
@@ -1330,6 +1411,16 @@ func (it *histogramIterator) Next() ValueType {
 		it.nBuckets[i] += it.nBucketsDelta[i]
 		current += it.nBuckets[i]
 		it.nFloatBuckets[i] = float64(current)
+	}
+
+	for i := range it.cBuckets {
+		dod, err := readVarbitInt(&it.br)
+		if err != nil {
+			it.err = err
+			return ValNone
+		}
+		it.cBucketsDelta[i] += dod
+		it.cBuckets[i] += it.cBucketsDelta[i]
 	}
 
 	it.numRead++

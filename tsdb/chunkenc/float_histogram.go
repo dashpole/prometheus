@@ -119,22 +119,32 @@ func (c *FloatHistogramChunk) Appender() (Appender, error) {
 			trailing: it.nBucketsTrailing[i],
 		}
 	}
+	cBuckets := make([]xorValue, len(it.cBuckets))
+	for i := 0; i < len(it.cBuckets); i++ {
+		cBuckets[i] = xorValue{
+			value:    it.cBuckets[i],
+			leading:  it.cBucketsLeading[i],
+			trailing: it.cBucketsTrailing[i],
+		}
+	}
 
 	a := &FloatHistogramAppender{
 		b: &c.b,
 
-		schema:       it.schema,
-		zThreshold:   it.zThreshold,
-		pSpans:       it.pSpans,
-		nSpans:       it.nSpans,
-		customValues: it.customValues,
-		t:            it.t,
-		tDelta:       it.tDelta,
-		cnt:          it.cnt,
-		zCnt:         it.zCnt,
-		pBuckets:     pBuckets,
-		nBuckets:     nBuckets,
-		sum:          it.sum,
+		schema:        it.schema,
+		zThreshold:    it.zThreshold,
+		pSpans:        it.pSpans,
+		nSpans:        it.nSpans,
+		customValues:  it.customValues,
+		classicValues: it.classicValues,
+		t:             it.t,
+		tDelta:        it.tDelta,
+		cnt:           it.cnt,
+		zCnt:          it.zCnt,
+		pBuckets:      pBuckets,
+		nBuckets:      nBuckets,
+		cBuckets:      cBuckets,
+		sum:           it.sum,
 	}
 	return a, nil
 }
@@ -175,10 +185,12 @@ type FloatHistogramAppender struct {
 	zThreshold     float64
 	pSpans, nSpans []histogram.Span
 	customValues   []float64
+	classicValues  []float64
 
 	t, tDelta          int64
 	sum, cnt, zCnt     xorValue
 	pBuckets, nBuckets []xorValue
+	cBuckets           []xorValue
 }
 
 func (a *FloatHistogramAppender) GetCounterResetHeader() CounterResetHeader {
@@ -522,7 +534,14 @@ func (a *FloatHistogramAppender) appendFloatHistogram(t int64, h *histogram.Floa
 	if num == 0 {
 		// The first append gets the privilege to dictate the layout
 		// but it's also responsible for encoding it into the chunk!
-		writeHistogramChunkLayout(a.b, h.Schema, h.ZeroThreshold, h.PositiveSpans, h.NegativeSpans, h.CustomValues)
+		var classicBounds []float64
+		if len(h.ClassicBuckets) > 0 {
+			classicBounds = make([]float64, len(h.ClassicBuckets))
+			for i, cb := range h.ClassicBuckets {
+				classicBounds[i] = cb.UpperBound
+			}
+		}
+		writeHistogramChunkLayout(a.b, h.Schema, h.ZeroThreshold, h.PositiveSpans, h.NegativeSpans, h.CustomValues, classicBounds)
 		a.schema = h.Schema
 		a.zThreshold = h.ZeroThreshold
 
@@ -543,6 +562,20 @@ func (a *FloatHistogramAppender) appendFloatHistogram(t int64, h *histogram.Floa
 			copy(a.customValues, h.CustomValues)
 		} else {
 			a.customValues = nil
+		}
+		if len(h.ClassicBuckets) > 0 {
+			a.classicValues = make([]float64, len(h.ClassicBuckets))
+			copy(a.classicValues, classicBounds)
+			a.cBuckets = make([]xorValue, len(h.ClassicBuckets))
+			for i := range h.ClassicBuckets {
+				a.cBuckets[i] = xorValue{
+					value:   h.ClassicBuckets[i].CumulativeCount,
+					leading: 0xff,
+				}
+			}
+		} else {
+			a.classicValues = nil
+			a.cBuckets = nil
 		}
 
 		numPBuckets, numNBuckets := countSpans(h.PositiveSpans), countSpans(h.NegativeSpans)
@@ -583,6 +616,9 @@ func (a *FloatHistogramAppender) appendFloatHistogram(t int64, h *histogram.Floa
 		for _, b := range h.NegativeBuckets {
 			a.b.writeBits(math.Float64bits(b), 64)
 		}
+		for _, cb := range h.ClassicBuckets {
+			a.b.writeBits(math.Float64bits(cb.CumulativeCount), 64)
+		}
 	} else {
 		// The case for the 2nd sample with single deltas is implicitly handled correctly with the double delta code,
 		// so we don't need a separate single delta logic for the 2nd sample.
@@ -599,6 +635,9 @@ func (a *FloatHistogramAppender) appendFloatHistogram(t int64, h *histogram.Floa
 		}
 		for i, b := range h.NegativeBuckets {
 			a.writeXorValue(&a.nBuckets[i], b)
+		}
+		for i, cb := range h.ClassicBuckets {
+			a.writeXorValue(&a.cBuckets[i], cb.CumulativeCount)
 		}
 	}
 
@@ -817,6 +856,7 @@ type floatHistogramIterator struct {
 	zThreshold     float64
 	pSpans, nSpans []histogram.Span
 	customValues   []float64
+	classicValues  []float64
 
 	// For the fields that are tracked as deltas and ultimately dod's.
 	t      int64
@@ -830,6 +870,9 @@ type floatHistogramIterator struct {
 	pBuckets, nBuckets                 []float64
 	pBucketsLeading, nBucketsLeading   []uint8
 	pBucketsTrailing, nBucketsTrailing []uint8
+	cBuckets                           []float64
+	cBucketsLeading                    []uint8
+	cBucketsTrailing                   []uint8
 
 	err error
 
@@ -866,6 +909,16 @@ func (it *floatHistogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram)
 	}
 	if fh == nil {
 		it.atFloatHistogramCalled = true
+		var classicBuckets []histogram.ClassicBucket
+		if len(it.classicValues) > 0 {
+			classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
+			for idx, bound := range it.classicValues {
+				classicBuckets[idx] = histogram.ClassicBucket{
+					UpperBound:      bound,
+					CumulativeCount: it.cBuckets[idx],
+				}
+			}
+		}
 		fh = &histogram.FloatHistogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
 			Count:            it.cnt.value,
@@ -878,6 +931,7 @@ func (it *floatHistogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram)
 			PositiveBuckets:  it.pBuckets,
 			NegativeBuckets:  it.nBuckets,
 			CustomValues:     it.customValues,
+			ClassicBuckets:   classicBuckets,
 		}
 		if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
 			// This is a very slow path, but it should only happen if the
@@ -917,6 +971,14 @@ func (it *floatHistogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram)
 
 	// Custom values are interned. The single copy is in this iterator.
 	fh.CustomValues = it.customValues
+
+	fh.ClassicBuckets = resize(fh.ClassicBuckets, len(it.classicValues))
+	for idx, bound := range it.classicValues {
+		fh.ClassicBuckets[idx] = histogram.ClassicBucket{
+			UpperBound:      bound,
+			CumulativeCount: it.cBuckets[idx],
+		}
+	}
 
 	if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
 		// This is a very slow path, but it should only happen if the
@@ -981,7 +1043,7 @@ func (it *floatHistogramIterator) Next() ValueType {
 		// The first read is responsible for reading the chunk layout
 		// and for initializing fields that depend on it. We give
 		// counter reset info at chunk level, hence we discard it here.
-		schema, zeroThreshold, posSpans, negSpans, customValues, err := readHistogramChunkLayout(&it.br)
+		schema, zeroThreshold, posSpans, negSpans, customValues, classicValues, err := readHistogramChunkLayout(&it.br)
 		if err != nil {
 			it.err = err
 			return ValNone
@@ -996,6 +1058,7 @@ func (it *floatHistogramIterator) Next() ValueType {
 		it.zThreshold = zeroThreshold
 		it.pSpans, it.nSpans = posSpans, negSpans
 		it.customValues = customValues
+		it.classicValues = classicValues
 		numPBuckets, numNBuckets := countSpans(posSpans), countSpans(negSpans)
 		// Allocate bucket slices as needed, recycling existing slices
 		// in case this iterator was reset and already has slices of a
@@ -1009,6 +1072,11 @@ func (it *floatHistogramIterator) Next() ValueType {
 			it.nBuckets = append(it.nBuckets, make([]float64, numNBuckets)...)
 			it.nBucketsLeading = append(it.nBucketsLeading, make([]uint8, numNBuckets)...)
 			it.nBucketsTrailing = append(it.nBucketsTrailing, make([]uint8, numNBuckets)...)
+		}
+		if len(classicValues) > 0 {
+			it.cBuckets = append(it.cBuckets, make([]float64, len(classicValues))...)
+			it.cBucketsLeading = append(it.cBucketsLeading, make([]uint8, len(classicValues))...)
+			it.cBucketsTrailing = append(it.cBucketsTrailing, make([]uint8, len(classicValues))...)
 		}
 
 		// Now read the actual data.
@@ -1057,6 +1125,15 @@ func (it *floatHistogramIterator) Next() ValueType {
 			it.nBuckets[i] = math.Float64frombits(v)
 		}
 
+		for i := range it.cBuckets {
+			v, err := it.br.readBits(64)
+			if err != nil {
+				it.err = err
+				return ValNone
+			}
+			it.cBuckets[i] = math.Float64frombits(v)
+		}
+
 		it.numRead++
 		return ValFloatHistogram
 	}
@@ -1082,6 +1159,13 @@ func (it *floatHistogramIterator) Next() ValueType {
 			it.nBuckets = newBuckets
 		} else {
 			it.nBuckets = nil
+		}
+		if len(it.cBuckets) > 0 {
+			newBuckets := make([]float64, len(it.cBuckets))
+			copy(newBuckets, it.cBuckets)
+			it.cBuckets = newBuckets
+		} else {
+			it.cBuckets = nil
 		}
 		if len(it.pSpans) > 0 {
 			newSpans := make([]histogram.Span, len(it.pSpans))
@@ -1139,6 +1223,12 @@ func (it *floatHistogramIterator) Next() ValueType {
 
 	for i := range it.nBuckets {
 		if ok := it.readXor(&it.nBuckets[i], &it.nBucketsLeading[i], &it.nBucketsTrailing[i]); !ok {
+			return ValNone
+		}
+	}
+
+	for i := range it.cBuckets {
+		if ok := it.readXor(&it.cBuckets[i], &it.cBucketsLeading[i], &it.cBucketsTrailing[i]); !ok {
 			return ValNone
 		}
 	}
