@@ -332,10 +332,13 @@ func TestHistogramExplicitBucketsPrecedence(t *testing.T) {
 
 		ih := h.ToIntHistogram()
 		require.NotNil(t, ih)
-		require.Equal(t, histogram.CustomBucketsSchema, ih.Schema)
-		require.Equal(t, []float64{0.1, 0.5, 1.0}, ih.CustomValues)
-		require.Equal(t, []int64{5, 2, 3}, ih.PositiveBuckets)
-		require.Equal(t, []histogram.Span{{Offset: 0, Length: 3}}, ih.PositiveSpans)
+		require.Equal(t, int32(0), ih.Schema)
+		require.Len(t, ih.ClassicBuckets, 3)
+		require.Equal(t, []histogram.ClassicBucket{
+			{UpperBound: 0.1, CumulativeCount: 5},
+			{UpperBound: 0.5, CumulativeCount: 7},
+			{UpperBound: 1.0, CumulativeCount: 10},
+		}, ih.ClassicBuckets)
 	})
 
 	t.Run("ToFloatHistogram", func(t *testing.T) {
@@ -353,9 +356,47 @@ func TestHistogramExplicitBucketsPrecedence(t *testing.T) {
 
 		fh := h.ToFloatHistogram()
 		require.NotNil(t, fh)
-		require.Equal(t, histogram.CustomBucketsSchema, fh.Schema)
-		require.Equal(t, []float64{0.1, 0.5, 1.0}, fh.CustomValues)
-		require.Equal(t, []float64{5.5, 2.0, 3.0}, fh.PositiveBuckets)
-		require.Equal(t, []histogram.Span{{Offset: 0, Length: 3}}, fh.PositiveSpans)
+		require.Equal(t, int32(0), fh.Schema)
+		require.Len(t, fh.ClassicBuckets, 3)
+		require.Equal(t, []histogram.ClassicBucket{
+			{UpperBound: 0.1, CumulativeCount: 5.5},
+			{UpperBound: 0.5, CumulativeCount: 7.5},
+			{UpperBound: 1.0, CumulativeCount: 10.5},
+		}, fh.ClassicBuckets)
+	})
+}
+
+func TestFromHistogramWithClassicBuckets(t *testing.T) {
+	classicBuckets := []histogram.ClassicBucket{
+		{UpperBound: 1.0, CumulativeCount: 5},
+		{UpperBound: 2.5, CumulativeCount: 10},
+	}
+
+	t.Run("ToIntHistogram", func(t *testing.T) {
+		h := histogram.Histogram{
+			Count:          10,
+			Sum:            20,
+			ClassicBuckets: classicBuckets,
+		}
+		got := writev2.FromIntHistogram(123, &h)
+		require.Len(t, got.ClassicBuckets, 2)
+		require.Equal(t, 1.0, got.ClassicBuckets[0].UpperBound)
+		require.Equal(t, 5.0, got.ClassicBuckets[0].CumulativeCount)
+		require.Equal(t, 2.5, got.ClassicBuckets[1].UpperBound)
+		require.Equal(t, 10.0, got.ClassicBuckets[1].CumulativeCount)
+	})
+
+	t.Run("ToFloatHistogram", func(t *testing.T) {
+		fh := histogram.FloatHistogram{
+			Count:          10.5,
+			Sum:            20.5,
+			ClassicBuckets: classicBuckets,
+		}
+		got := writev2.FromFloatHistogram(123, &fh)
+		require.Len(t, got.ClassicBuckets, 2)
+		require.Equal(t, 1.0, got.ClassicBuckets[0].UpperBound)
+		require.Equal(t, 5.0, got.ClassicBuckets[0].CumulativeCount)
+		require.Equal(t, 2.5, got.ClassicBuckets[1].UpperBound)
+		require.Equal(t, 10.0, got.ClassicBuckets[1].CumulativeCount)
 	})
 }

@@ -1783,3 +1783,73 @@ func TestRemoteWriteHandler_ResponseStats(t *testing.T) {
 		})
 	}
 }
+
+func TestWriteHandlerStoreV2CombinedClassicHistograms(t *testing.T) {
+	// 1. Set up SymbolTable
+	st := writev2.NewSymbolTable()
+	// Label names and values
+	metricNameRef := st.Symbolize("__name__")
+	metricValRef := st.Symbolize("http_request_duration_seconds")
+	jobNameRef := st.Symbolize("job")
+	jobValRef := st.Symbolize("test")
+
+	// 2. Construct PRW 2.0 request Timeseries containing classic buckets
+	ts := writev2.TimeSeries{
+		LabelsRefs: []uint32{metricNameRef, metricValRef, jobNameRef, jobValRef},
+		Histograms: []writev2.Histogram{
+			{
+				Count:     &writev2.Histogram_CountInt{CountInt: 15},
+				Sum:       18.4,
+				Timestamp: 1000,
+				ClassicBuckets: []*writev2.ClassicBucket{
+					{UpperBound: 1.0, CumulativeCount: 5},
+					{UpperBound: 2.5, CumulativeCount: 10},
+					{UpperBound: 5.0, CumulativeCount: 15},
+				},
+			},
+		},
+	}
+
+	payload, _, _, err := buildV2WriteRequest(promslog.NewNopLogger(), []writev2.TimeSeries{ts}, st.Symbols(), nil, nil, nil, "snappy")
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "", bytes.NewReader(payload))
+	require.NoError(t, err)
+
+	req.Header.Set("Content-Type", remoteWriteContentTypeHeaders[remoteapi.WriteV2MessageType])
+	req.Header.Set("Content-Encoding", compression.Snappy)
+	req.Header.Set(RemoteWriteVersionHeader, RemoteWriteVersion20HeaderValue)
+
+	appendable := &mockAppendable{
+		latestSample:    map[uint64]int64{},
+		latestExemplar:  map[uint64]int64{},
+		latestHistogram: map[uint64]int64{},
+		latestFloatHist: map[uint64]int64{},
+	}
+
+	// Ingestion is done with convertClassicHistogramsToNHCB = true
+	handler := NewWriteHandler(promslog.NewNopLogger(), nil, appendable, []remoteapi.WriteMessageType{remoteapi.WriteV2MessageType}, false, false, false, true)
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	resp := recorder.Result()
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+	// Verify that the mock appendable received the correct schema 0 combined histogram!
+	require.Len(t, appendable.histograms, 1)
+	hAppended := appendable.histograms[0]
+	require.Equal(t, int64(1000), hAppended.t)
+
+	h := hAppended.h
+	require.NotNil(t, h)
+	require.Equal(t, int32(0), h.Schema) // Pure classic histogram gets schema 0!
+	require.Equal(t, uint64(15), h.Count)
+	require.Equal(t, 18.4, h.Sum)
+	require.Len(t, h.ClassicBuckets, 3)
+	require.Equal(t, []histogram.ClassicBucket{
+		{UpperBound: 1.0, CumulativeCount: 5},
+		{UpperBound: 2.5, CumulativeCount: 10},
+		{UpperBound: 5.0, CumulativeCount: 15},
+	}, h.ClassicBuckets)
+}
