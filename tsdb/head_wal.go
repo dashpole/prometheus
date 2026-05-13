@@ -733,6 +733,11 @@ func (wp *walSubsetProcessor) processWALSamples(h *Head, mmappedChunks, oooMmapp
 			if staleToNonStale {
 				h.numStaleSeries.Dec()
 			}
+			if s.h != nil {
+				h.addClassicPostings(ms, s.h.ClassicBuckets)
+			} else {
+				h.addClassicPostings(ms, s.fh.ClassicBuckets)
+			}
 			if chunkCreated {
 				h.metrics.chunksCreated.Inc()
 				h.metrics.chunks.Inc()

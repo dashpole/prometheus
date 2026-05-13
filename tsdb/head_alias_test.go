@@ -16,6 +16,7 @@ package tsdb
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -116,4 +117,67 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	require.Equal(t, int64(1000), tVal)
 	require.Equal(t, 4.0, fVal) // CumulativeCount for UpperBound 2.5 is 4!
 	require.Equal(t, chunkenc.ValNone, it.Next())
+}
+
+func TestWALReplayVirtualPostings(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions()
+	opts.RetentionDuration = int64(time.Hour * 24 * 15 / time.Millisecond)
+	opts.NoLockfile = true
+	// Very large block duration so it doesn't compact automatically!
+	opts.MinBlockDuration = int64(time.Hour * 24 / time.Millisecond)
+	opts.MaxBlockDuration = int64(time.Hour * 24 / time.Millisecond)
+
+	// 1. Open DB and append combined histogram
+	db, err := Open(dir, nil, nil, opts, nil)
+	require.NoError(t, err)
+
+	hist := &histogram.Histogram{
+		Count:         15,
+		Sum:           18.4,
+		ZeroThreshold: 0.001,
+		Schema:        0,
+		ClassicBuckets: []histogram.ClassicBucket{
+			{UpperBound: 1.0, CumulativeCount: 5},
+			{UpperBound: 2.5, CumulativeCount: 10},
+			{UpperBound: 5.0, CumulativeCount: 15},
+		},
+	}
+
+	lset := labels.FromStrings("__name__", "http_request_duration_seconds", "job", "test")
+	app := db.Appender(context.Background())
+	_, err = app.AppendHistogram(0, lset, 1000, hist, nil)
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+
+	// Close DB immediately (so data remains only in the WAL)
+	require.NoError(t, db.Close())
+
+	// 2. Re-open DB (triggers WAL replay)
+	db, err = Open(dir, nil, nil, opts, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	// 3. Query to verify virtual postings are fully recovered!
+	q, err := db.Querier(0, 2000)
+	require.NoError(t, err)
+	defer q.Close()
+
+	// Check count virtual series
+	pCount, warnings, err := q.LabelValues(context.Background(), "__name__", nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "http_request_duration_seconds_count"))
+	require.NoError(t, err)
+	require.Empty(t, warnings)
+	require.Equal(t, []string{"http_request_duration_seconds_count"}, pCount)
+
+	// Check bucket virtual series with le="2.5"
+	ssBucket := q.Select(context.Background(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "http_request_duration_seconds_bucket"), labels.MustNewMatcher(labels.MatchEqual, "le", "2.5"))
+	require.True(t, ssBucket.Next())
+	itBucket := ssBucket.At().Iterator(nil)
+	require.Equal(t, chunkenc.ValFloat, itBucket.Next())
+	tb, vb := itBucket.At()
+	require.Equal(t, int64(1000), tb)
+	require.Equal(t, 10.0, vb)
+	require.Equal(t, chunkenc.ValNone, itBucket.Next())
+	require.False(t, ssBucket.Next())
 }

@@ -698,6 +698,17 @@ func DecodeHistogram(buf *encoding.Decbuf, h *histogram.Histogram) {
 			h.CustomValues[i] = buf.Be64Float64()
 		}
 	}
+
+	if len(buf.B) > 0 {
+		l = buf.Uvarint()
+		if l > 0 {
+			h.ClassicBuckets = make([]histogram.ClassicBucket, l)
+			for i := range h.ClassicBuckets {
+				h.ClassicBuckets[i].UpperBound = buf.Be64Float64()
+				h.ClassicBuckets[i].CumulativeCount = buf.Be64Float64()
+			}
+		}
+	}
 }
 
 // FloatHistogramSamples appends float histogram samples in rec to the given
@@ -872,6 +883,17 @@ func DecodeFloatHistogram(buf *encoding.Decbuf, fh *histogram.FloatHistogram) {
 		}
 		for i := range fh.CustomValues {
 			fh.CustomValues[i] = buf.Be64Float64()
+		}
+	}
+
+	if len(buf.B) > 0 {
+		l = buf.Uvarint()
+		if l > 0 {
+			fh.ClassicBuckets = make([]histogram.ClassicBucket, l)
+			for i := range fh.ClassicBuckets {
+				fh.ClassicBuckets[i].UpperBound = buf.Be64Float64()
+				fh.ClassicBuckets[i].CumulativeCount = buf.Be64Float64()
+			}
 		}
 	}
 }
@@ -1225,6 +1247,12 @@ func EncodeHistogram(buf *encoding.Encbuf, h *histogram.Histogram) {
 			buf.PutBEFloat64(v)
 		}
 	}
+
+	buf.PutUvarint(len(h.ClassicBuckets))
+	for _, cb := range h.ClassicBuckets {
+		buf.PutBEFloat64(cb.UpperBound)
+		buf.PutBEFloat64(cb.CumulativeCount)
+	}
 }
 
 // FloatHistogramSamples encodes exponential float histogram samples.
@@ -1374,5 +1402,11 @@ func EncodeFloatHistogram(buf *encoding.Encbuf, h *histogram.FloatHistogram) {
 		for _, v := range h.CustomValues {
 			buf.PutBEFloat64(v)
 		}
+	}
+
+	buf.PutUvarint(len(h.ClassicBuckets))
+	for _, cb := range h.ClassicBuckets {
+		buf.PutBEFloat64(cb.UpperBound)
+		buf.PutBEFloat64(cb.CumulativeCount)
 	}
 }

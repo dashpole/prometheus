@@ -92,6 +92,46 @@ func unpackVirtualSeriesRef(ref storage.SeriesRef) virtualSeriesInfo {
 	}
 }
 
+func (h *Head) addClassicPostings(s *memSeries, classicBuckets []histogram.ClassicBucket) {
+	if s.classicPostingsAdded || len(classicBuckets) == 0 {
+		return
+	}
+
+	baseName := s.lset.Get("__name__")
+	if baseName == "" {
+		return
+	}
+
+	// 1. Add _count virtual postings
+	countLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_count").Labels()
+	if h.series.getByHash(countLabels.Hash(), countLabels) == nil {
+		countID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 0)
+		h.postings.Add(countID, countLabels)
+	}
+
+	// 2. Add _sum virtual postings
+	sumLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_sum").Labels()
+	if h.series.getByHash(sumLabels.Hash(), sumLabels) == nil {
+		sumID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 1)
+		h.postings.Add(sumID, sumLabels)
+	}
+
+	// 3. Add _bucket virtual postings for each le
+	for idx, cb := range classicBuckets {
+		leStr := labels.FormatOpenMetricsFloat(cb.UpperBound)
+		bucketLabels := labels.NewBuilder(s.lset).
+			Set("__name__", baseName+"_bucket").
+			Set("le", leStr).
+			Labels()
+		if h.series.getByHash(bucketLabels.Hash(), bucketLabels) == nil {
+			bucketID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), uint64(2+idx))
+			h.postings.Add(bucketID, bucketLabels)
+		}
+	}
+
+	s.classicPostingsAdded = true
+}
+
 // Head handles reads and writes of time series data within a time window.
 type Head struct {
 	chunkRange               atomic.Int64

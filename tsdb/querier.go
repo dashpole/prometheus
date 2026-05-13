@@ -1375,26 +1375,27 @@ func (cr nopChunkReader) ChunkOrIterable(chunks.Meta) (chunkenc.Chunk, chunkenc.
 func (nopChunkReader) Close() error { return nil }
 
 type blockVirtualIterator struct {
-	base       chunkenc.Iterator
-	aliasType  string
-	upperBound float64
-	err        error
+	base        chunkenc.Iterator
+	aliasType   string
+	upperBound  float64
+	err         error
+	baseValType chunkenc.ValueType
 }
 
 func (it *blockVirtualIterator) Next() chunkenc.ValueType {
-	vt := it.base.Next()
-	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+	it.baseValType = it.base.Next()
+	if it.baseValType == chunkenc.ValHistogram || it.baseValType == chunkenc.ValFloatHistogram {
 		return chunkenc.ValFloat
 	}
-	return vt
+	return it.baseValType
 }
 
 func (it *blockVirtualIterator) Seek(t int64) chunkenc.ValueType {
-	vt := it.base.Seek(t)
-	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+	it.baseValType = it.base.Seek(t)
+	if it.baseValType == chunkenc.ValHistogram || it.baseValType == chunkenc.ValFloatHistogram {
 		return chunkenc.ValFloat
 	}
-	return vt
+	return it.baseValType
 }
 
 func (it *blockVirtualIterator) At() (int64, float64) {
@@ -1435,6 +1436,10 @@ func (*blockVirtualIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64,
 }
 
 func (it *blockVirtualIterator) projectValue() (int64, float64, error) {
+	if it.baseValType == chunkenc.ValFloat {
+		t, v := it.base.At()
+		return t, v, nil
+	}
 	t, fh := it.base.AtFloatHistogram(nil)
 	if value.IsStaleNaN(fh.Sum) {
 		return t, fh.Sum, nil
