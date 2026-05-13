@@ -898,7 +898,7 @@ type virtualChunk struct {
 	info virtualSeriesInfo
 }
 
-func (c virtualChunk) Encoding() chunkenc.Encoding {
+func (virtualChunk) Encoding() chunkenc.Encoding {
 	return chunkenc.EncXOR
 }
 
@@ -941,11 +941,11 @@ func (it *virtualIterator) At() (int64, float64) {
 	return t, val
 }
 
-func (it *virtualIterator) AtHistogram(*histogram.Histogram) (int64, *histogram.Histogram) {
+func (*virtualIterator) AtHistogram(*histogram.Histogram) (int64, *histogram.Histogram) {
 	panic("cannot call AtHistogram on virtual float iterator")
 }
 
-func (it *virtualIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
+func (*virtualIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
 	panic("cannot call AtFloatHistogram on virtual float iterator")
 }
 

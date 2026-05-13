@@ -1,3 +1,16 @@
+// Copyright The Prometheus Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package tsdb
 
 import (
@@ -8,7 +21,6 @@ import (
 
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/index"
@@ -57,7 +69,7 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	baseRefs, err := index.ExpandPostings(pBase)
 	require.NoError(t, err)
 	require.Len(t, baseRefs, 1)
-	require.Equal(t, storage.SeriesRef(ref), baseRefs[0])
+	require.Equal(t, ref, baseRefs[0])
 
 	// 2. Verify postings for _count alias!
 	pCount, err := ir.Postings(context.Background(), "__name__", "http_request_duration_seconds_count")
@@ -65,7 +77,7 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	countRefs, err := index.ExpandPostings(pCount)
 	require.NoError(t, err)
 	require.Len(t, countRefs, 1)
-	require.True(t, uint64(countRefs[0])&virtualSeriesMask != 0)
+	require.NotEqual(t, uint64(0), uint64(countRefs[0])&virtualSeriesMask)
 
 	// 3. Verify postings for _bucket alias with le="2.5"!
 	pBucket, err := ir.Postings(context.Background(), "le", "2.5")
@@ -73,7 +85,7 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	bucketRefs, err := index.ExpandPostings(pBucket)
 	require.NoError(t, err)
 	require.Len(t, bucketRefs, 1)
-	require.True(t, uint64(bucketRefs[0])&virtualSeriesMask != 0)
+	require.NotEqual(t, uint64(0), uint64(bucketRefs[0])&virtualSeriesMask)
 
 	// 4. Verify Series labels spoofing!
 	var builder labels.ScratchBuilder
