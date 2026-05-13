@@ -1055,6 +1055,16 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 	}
 	if fh == nil {
 		it.atFloatHistogramCalled = true
+		var classicBuckets []histogram.ClassicBucket
+		if len(it.classicValues) > 0 {
+			classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
+			for idx, bound := range it.classicValues {
+				classicBuckets[idx] = histogram.ClassicBucket{
+					UpperBound:      bound,
+					CumulativeCount: float64(it.cBuckets[idx]),
+				}
+			}
+		}
 		fh = &histogram.FloatHistogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
 			Count:            float64(it.cnt),
@@ -1067,6 +1077,7 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 			PositiveBuckets:  it.pFloatBuckets,
 			NegativeBuckets:  it.nFloatBuckets,
 			CustomValues:     it.customValues,
+			ClassicBuckets:   classicBuckets,
 		}
 		if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
 			// This is a very slow path, but it should only happen if the
@@ -1114,6 +1125,14 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 
 	// Custom values are interned. The single copy is here in the iterator.
 	fh.CustomValues = it.customValues
+
+	fh.ClassicBuckets = resize(fh.ClassicBuckets, len(it.classicValues))
+	for idx, bound := range it.classicValues {
+		fh.ClassicBuckets[idx] = histogram.ClassicBucket{
+			UpperBound:      bound,
+			CumulativeCount: float64(it.cBuckets[idx]),
+		}
+	}
 
 	if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
 		// This is a very slow path, but it should only happen if the

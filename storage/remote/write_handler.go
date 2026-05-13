@@ -445,16 +445,14 @@ func (h *writeHandler) appendV2(app storage.Appender, req *writev2.Request, rs *
 					if goFloatHist != nil {
 						goFloatHist.ClassicBuckets = classicBuckets
 					}
-				} else {
+				} else if !hasNative {
 					// Both are present, and we ARE converting classic to NHCB.
 					// Drop classic buckets when both are present to avoid naming collision.
-					if !hasNative {
-						// Only classic is present, convert to Native (NHCB).
-						if hp.IsFloatHistogram() {
-							goFloatHist = hp.ToFloatHistogram()
-						} else {
-							goHist = hp.ToIntHistogram()
-						}
+					// Only classic is present, convert to Native (NHCB).
+					if hp.IsFloatHistogram() {
+						goFloatHist = hp.ToFloatHistogram()
+					} else {
+						goHist = hp.ToIntHistogram()
 					}
 				}
 			}
@@ -548,27 +546,6 @@ func (*writeHandler) handleHistogramZeroSample(app storage.Appender, ref storage
 		ref, err = app.AppendHistogramSTZeroSample(ref, l, hist.Timestamp, st, hist.ToIntHistogram(), nil)
 	}
 	return ref, err
-}
-
-func (*writeHandler) appendClassicSeries(app storage.Appender, hp writev2.Histogram, ls labels.Labels, rs *remoteapi.WriteResponseStats) error {
-	var customHist any
-	if hp.IsFloatHistogram() {
-		customHist = hp.ToFloatHistogram()
-	} else {
-		customHist = hp.ToIntHistogram()
-	}
-
-	lsetBuilder := labels.NewBuilder(ls)
-
-	emitFn := func(lbls labels.Labels, val float64) error {
-		_, err := app.Append(0, lbls, hp.Timestamp, val)
-		if err == nil && rs != nil {
-			rs.Samples++
-		}
-		return err
-	}
-
-	return histogram.ConvertNHCBToClassic(customHist, ls, lsetBuilder, emitFn)
 }
 
 // TODO(bwplotka): Consider exposing timeLimitAppender and bucketLimitAppender appenders from scrape/target.go

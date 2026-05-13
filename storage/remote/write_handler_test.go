@@ -874,7 +874,7 @@ func TestRemoteWriteHandler_V2Message(t *testing.T) {
 						} else {
 							storedClassicBuckets = appendable.histograms[k].h.ClassicBuckets
 						}
-						require.Equal(t, len(hp.ClassicBuckets), len(storedClassicBuckets))
+						require.Len(t, storedClassicBuckets, len(hp.ClassicBuckets))
 						for idx, cb := range hp.ClassicBuckets {
 							require.Equal(t, cb.UpperBound, storedClassicBuckets[idx].UpperBound)
 							require.Equal(t, cb.CumulativeCount, storedClassicBuckets[idx].CumulativeCount)

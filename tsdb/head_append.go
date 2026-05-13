@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strconv"
 	"time"
 
 	"github.com/prometheus/prometheus/model/exemplar"
@@ -1531,6 +1532,7 @@ func (a *headAppenderBase) commitHistograms(b *appendBatch, acc *appenderCommitC
 					acc.oooMaxT = s.T
 				}
 				acc.oooHistogramAccepted++
+				a.addClassicPostings(series, s.H.ClassicBuckets)
 			} else {
 				// Sample is an exact duplicate of the last sample.
 				// NOTE: We can only detect updates if they clash with a sample in the OOOHeadChunk,
@@ -1560,6 +1562,7 @@ func (a *headAppenderBase) commitHistograms(b *appendBatch, acc *appenderCommitC
 				if staleToNonStale {
 					a.head.numStaleSeries.Dec()
 				}
+				a.addClassicPostings(series, s.H.ClassicBuckets)
 			} else {
 				acc.histogramsAppended--
 				acc.histoOOORejected++
@@ -1642,6 +1645,7 @@ func (a *headAppenderBase) commitFloatHistograms(b *appendBatch, acc *appenderCo
 					acc.oooMaxT = s.T
 				}
 				acc.oooHistogramAccepted++
+				a.addClassicPostings(series, s.FH.ClassicBuckets)
 			} else {
 				// Sample is an exact duplicate of the last sample.
 				// NOTE: We can only detect updates if they clash with a sample in the OOOHeadChunk,
@@ -1671,6 +1675,7 @@ func (a *headAppenderBase) commitFloatHistograms(b *appendBatch, acc *appenderCo
 				if staleToNonStale {
 					a.head.numStaleSeries.Dec()
 				}
+				a.addClassicPostings(series, s.FH.ClassicBuckets)
 			} else {
 				acc.histogramsAppended--
 				acc.histoOOORejected++
@@ -2299,4 +2304,56 @@ func (a *headAppenderBase) Rollback() (err error) {
 	// Series are created in the head memory regardless of rollback. Thus we have
 	// to log them to the WAL in any case.
 	return a.log()
+}
+
+func (a *headAppenderBase) addClassicPostings(s *memSeries, classicBuckets []histogram.ClassicBucket) {
+	if s.classicPostingsAdded || len(classicBuckets) == 0 {
+		return
+	}
+
+	baseName := s.lset.Get("__name__")
+	if baseName == "" {
+		return
+	}
+
+	h := a.head
+
+	h.virtualSeriesMtx.Lock()
+	defer h.virtualSeriesMtx.Unlock()
+
+	// 1. Add _count virtual postings
+	countID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+	h.virtualSeriesMap[storage.SeriesRef(countID)] = virtualSeriesInfo{
+		baseRef:   storage.SeriesRef(s.ref),
+		aliasType: "count",
+	}
+	countLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_count").Labels()
+	h.postings.Add(storage.SeriesRef(countID), countLabels)
+
+	// 2. Add _sum virtual postings
+	sumID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+	h.virtualSeriesMap[storage.SeriesRef(sumID)] = virtualSeriesInfo{
+		baseRef:   storage.SeriesRef(s.ref),
+		aliasType: "sum",
+	}
+	sumLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_sum").Labels()
+	h.postings.Add(storage.SeriesRef(sumID), sumLabels)
+
+	// 3. Add _bucket virtual postings for each le
+	for _, cb := range classicBuckets {
+		bucketID := h.virtualSeriesLastID.Inc() | virtualSeriesMask
+		h.virtualSeriesMap[storage.SeriesRef(bucketID)] = virtualSeriesInfo{
+			baseRef:    storage.SeriesRef(s.ref),
+			aliasType:  "bucket",
+			upperBound: cb.UpperBound,
+		}
+		leStr := strconv.FormatFloat(cb.UpperBound, 'g', -1, 64)
+		bucketLabels := labels.NewBuilder(s.lset).
+			Set("__name__", baseName+"_bucket").
+			Set("le", leStr).
+			Labels()
+		h.postings.Add(storage.SeriesRef(bucketID), bucketLabels)
+	}
+
+	s.classicPostingsAdded = true
 }

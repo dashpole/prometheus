@@ -67,6 +67,14 @@ var (
 	defaultWALReplayConcurrency = runtime.GOMAXPROCS(0)
 )
 
+const virtualSeriesMask uint64 = 1 << 39
+
+type virtualSeriesInfo struct {
+	baseRef    storage.SeriesRef
+	aliasType  string  // "bucket", "sum", "count"
+	upperBound float64 // Only used for "bucket"
+}
+
 // Head handles reads and writes of time series data within a time window.
 type Head struct {
 	chunkRange               atomic.Int64
@@ -150,6 +158,10 @@ type Head struct {
 
 	memTruncationInProcess atomic.Bool
 	memTruncationCallBack  func() // For testing purposes.
+
+	virtualSeriesMtx    sync.RWMutex
+	virtualSeriesMap    map[storage.SeriesRef]virtualSeriesInfo
+	virtualSeriesLastID atomic.Uint64
 }
 
 type ExemplarStorage interface {
@@ -304,9 +316,10 @@ func NewHead(r prometheus.Registerer, l *slog.Logger, wal, wbl *wlog.WL, opts *H
 				return &memChunk{}
 			},
 		},
-		stats:           stats,
-		reg:             r,
-		seriesStateQuit: make(chan struct{}),
+		stats:            stats,
+		reg:              r,
+		seriesStateQuit:  make(chan struct{}),
+		virtualSeriesMap: make(map[storage.SeriesRef]virtualSeriesInfo),
 	}
 	if err := h.resetInMemoryState(); err != nil {
 		return nil, err
@@ -2505,6 +2518,8 @@ type memSeries struct {
 
 	// txs is nil if isolation is disabled.
 	txs *txRing
+
+	classicPostingsAdded bool
 }
 
 // memSeriesOOOFields contains the fields required by memSeries

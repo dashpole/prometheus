@@ -19,8 +19,10 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strconv"
 	"sync"
 
+	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
@@ -191,13 +193,41 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 // Series returns the series for the given reference.
 // Chunks are skipped if chks is nil.
 func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchBuilder, chks *[]chunks.Meta) error {
-	s := h.head.series.getByID(chunks.HeadSeriesRef(ref))
+	isVirtual := uint64(ref)&virtualSeriesMask != 0
+	var baseRef storage.SeriesRef
+	var info virtualSeriesInfo
 
+	if isVirtual {
+		h.head.virtualSeriesMtx.RLock()
+		var ok bool
+		info, ok = h.head.virtualSeriesMap[ref]
+		h.head.virtualSeriesMtx.RUnlock()
+		if !ok {
+			return storage.ErrNotFound
+		}
+		baseRef = info.baseRef
+	} else {
+		baseRef = ref
+	}
+
+	s := h.head.series.getByID(chunks.HeadSeriesRef(baseRef))
 	if s == nil {
 		h.head.metrics.seriesNotFound.Inc()
 		return storage.ErrNotFound
 	}
-	builder.Assign(s.labels())
+
+	if isVirtual {
+		baseName := s.labels().Get("__name__")
+		lb := labels.NewBuilder(s.labels())
+		lb.Set("__name__", baseName+"_"+info.aliasType)
+		if info.aliasType == "bucket" {
+			leStr := strconv.FormatFloat(info.upperBound, 'g', -1, 64)
+			lb.Set("le", leStr)
+		}
+		builder.Assign(lb.Labels())
+	} else {
+		builder.Assign(s.labels())
+	}
 
 	if chks == nil {
 		return nil
@@ -207,7 +237,11 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 	defer s.Unlock()
 
 	*chks = (*chks)[:0]
-	*chks, h.headChunksBuf = appendSeriesChunks(s, h.mint, h.maxt, *chks, h.headChunksBuf)
+	if isVirtual {
+		*chks, h.headChunksBuf = appendVirtualSeriesChunks(s, ref, h.mint, h.maxt, *chks, h.headChunksBuf)
+	} else {
+		*chks, h.headChunksBuf = appendSeriesChunks(s, h.mint, h.maxt, *chks, h.headChunksBuf)
+	}
 	if cap(h.headChunksBuf) > headChunksBufMaxCap {
 		h.headChunksBuf = nil
 	}
@@ -520,7 +554,26 @@ func (h *headChunkReader) ChunkOrIterableWithCopy(meta chunks.Meta) (chunkenc.Ch
 func (h *headChunkReader) chunk(meta chunks.Meta, copyLastChunk bool) (chunkenc.Chunk, int64, error) {
 	sid, cid, isOOO := unpackHeadChunkRef(meta.Ref)
 
-	s := h.head.series.getByID(sid)
+	isVirtual := uint64(sid)&virtualSeriesMask != 0
+	var baseRef chunks.HeadSeriesRef
+	var info virtualSeriesInfo
+
+	if isVirtual {
+		h.head.virtualSeriesMtx.RLock()
+		var ok bool
+		var inf virtualSeriesInfo
+		inf, ok = h.head.virtualSeriesMap[storage.SeriesRef(sid)]
+		h.head.virtualSeriesMtx.RUnlock()
+		if !ok {
+			return nil, 0, storage.ErrNotFound
+		}
+		info = inf
+		baseRef = chunks.HeadSeriesRef(info.baseRef)
+	} else {
+		baseRef = sid
+	}
+
+	s := h.head.series.getByID(baseRef)
 	// This means that the series has been garbage collected.
 	if s == nil {
 		return nil, 0, storage.ErrNotFound
@@ -532,7 +585,14 @@ func (h *headChunkReader) chunk(meta chunks.Meta, copyLastChunk bool) (chunkenc.
 	if !isOOO {
 		headChunks = h.getOrCollectHeadChunks(s)
 	}
-	return h.head.chunkFromSeries(s, cid, isOOO, h.mint, h.maxt, h.isoState, copyLastChunk, headChunks)
+	chk, maxTime, err := h.head.chunkFromSeries(s, cid, isOOO, h.mint, h.maxt, h.isoState, copyLastChunk, headChunks)
+	if err != nil {
+		return nil, 0, err
+	}
+	if isVirtual {
+		return &virtualChunk{Chunk: chk, info: info}, maxTime, nil
+	}
+	return chk, maxTime, nil
 }
 
 // Dumb thing to defeat chunk pool.
@@ -785,4 +845,143 @@ func makeStopIterator(c chunkenc.Chunk, it chunkenc.Iterator, stopAfter int) chu
 		i:         -1,
 		stopAfter: stopAfter,
 	}
+}
+
+func appendVirtualSeriesChunks(s *memSeries, virtualRef storage.SeriesRef, mint, maxt int64, chks []chunks.Meta, headChunksBuf []*memChunk) ([]chunks.Meta, []*memChunk) {
+	virtualSeriesRef := chunks.HeadSeriesRef(virtualRef)
+	for i, c := range s.mmappedChunks {
+		if !c.OverlapsClosedInterval(mint, maxt) {
+			continue
+		}
+		chks = append(chks, chunks.Meta{
+			MinTime: c.minTime,
+			MaxTime: c.maxTime,
+			Ref:     chunks.ChunkRef(chunks.NewHeadChunkRef(virtualSeriesRef, s.headChunkID(i))),
+		})
+	}
+
+	if s.headChunks == nil {
+		return chks, headChunksBuf
+	}
+
+	if s.headChunks.prev == nil {
+		if s.headChunks.OverlapsClosedInterval(mint, maxt) {
+			chks = append(chks, chunks.Meta{
+				MinTime: s.headChunks.minTime,
+				MaxTime: math.MaxInt64,
+				Ref:     chunks.ChunkRef(chunks.NewHeadChunkRef(virtualSeriesRef, s.headChunkID(len(s.mmappedChunks)))),
+			})
+		}
+		return chks, headChunksBuf
+	}
+
+	headChunksBuf = collectHeadChunks(s.headChunks, headChunksBuf[:0])
+	clear(headChunksBuf[len(headChunksBuf):cap(headChunksBuf)])
+	for i, chk := range headChunksBuf {
+		maxTime := chk.maxTime
+		if i == len(headChunksBuf)-1 {
+			maxTime = math.MaxInt64
+		}
+		if chk.OverlapsClosedInterval(mint, maxt) {
+			chks = append(chks, chunks.Meta{
+				MinTime: chk.minTime,
+				MaxTime: maxTime,
+				Ref:     chunks.ChunkRef(chunks.NewHeadChunkRef(virtualSeriesRef, s.headChunkID(len(s.mmappedChunks)+i))),
+			})
+		}
+	}
+	return chks, headChunksBuf
+}
+
+type virtualChunk struct {
+	chunkenc.Chunk
+	info virtualSeriesInfo
+}
+
+func (c virtualChunk) Encoding() chunkenc.Encoding {
+	return chunkenc.EncXOR
+}
+
+func (c virtualChunk) Iterator(reuseIter chunkenc.Iterator) chunkenc.Iterator {
+	var baseReuseIter chunkenc.Iterator
+	if wrappedReuse, ok := reuseIter.(*virtualIterator); ok {
+		baseReuseIter = wrappedReuse.base
+	}
+	baseIter := c.Chunk.Iterator(baseReuseIter)
+	return &virtualIterator{base: baseIter, info: c.info}
+}
+
+type virtualIterator struct {
+	base chunkenc.Iterator
+	info virtualSeriesInfo
+	err  error
+}
+
+func (it *virtualIterator) Next() chunkenc.ValueType {
+	vt := it.base.Next()
+	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+		return chunkenc.ValFloat
+	}
+	return vt
+}
+
+func (it *virtualIterator) Seek(t int64) chunkenc.ValueType {
+	vt := it.base.Seek(t)
+	if vt == chunkenc.ValHistogram || vt == chunkenc.ValFloatHistogram {
+		return chunkenc.ValFloat
+	}
+	return vt
+}
+
+func (it *virtualIterator) At() (int64, float64) {
+	t, val, err := it.projectValue()
+	if err != nil {
+		it.err = err
+	}
+	return t, val
+}
+
+func (it *virtualIterator) AtHistogram(*histogram.Histogram) (int64, *histogram.Histogram) {
+	panic("cannot call AtHistogram on virtual float iterator")
+}
+
+func (it *virtualIterator) AtFloatHistogram(*histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
+	panic("cannot call AtFloatHistogram on virtual float iterator")
+}
+
+func (it *virtualIterator) AtT() int64 {
+	return it.base.AtT()
+}
+
+func (it *virtualIterator) AtST() int64 {
+	return it.base.AtST()
+}
+
+func (it *virtualIterator) Err() error {
+	if it.err != nil {
+		return it.err
+	}
+	return it.base.Err()
+}
+
+func (it *virtualIterator) projectValue() (int64, float64, error) {
+	t, fh := it.base.AtFloatHistogram(nil)
+	if value.IsStaleNaN(fh.Sum) {
+		return t, fh.Sum, nil
+	}
+
+	switch it.info.aliasType {
+	case "sum":
+		return t, fh.Sum, nil
+	case "count":
+		return t, fh.Count, nil
+	case "bucket":
+		for _, cb := range fh.ClassicBuckets {
+			if cb.UpperBound == it.info.upperBound {
+				return t, cb.CumulativeCount, nil
+			}
+		}
+		return t, 0, nil
+	}
+	return t, 0, fmt.Errorf("unknown alias type: %s", it.info.aliasType)
 }
