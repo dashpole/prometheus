@@ -175,7 +175,7 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 
 	for p.Next() {
 		ref := p.At()
-		isVirtual := uint64(ref)&virtualSeriesMask != 0
+		isVirtual := uint64(ref)&VirtualSeriesMask != 0
 		baseRef := ref
 		if isVirtual {
 			baseRef = ref & 0xFFFFFFFF
@@ -203,13 +203,13 @@ func (h *headIndexReader) ShardedPostings(p index.Postings, shardIndex, shardCou
 // Series returns the series for the given reference.
 // Chunks are skipped if chks is nil.
 func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchBuilder, chks *[]chunks.Meta) error {
-	isVirtual := uint64(ref)&virtualSeriesMask != 0
+	isVirtual := uint64(ref)&VirtualSeriesMask != 0
 	var baseRef storage.SeriesRef
-	var info virtualSeriesInfo
+	var info VirtualSeriesInfo
 
 	if isVirtual {
-		info = unpackVirtualSeriesRef(ref)
-		baseRef = info.baseRef
+		info = UnpackVirtualSeriesRef(ref)
+		baseRef = info.BaseRef
 	} else {
 		baseRef = ref
 	}
@@ -223,14 +223,14 @@ func (h *headIndexReader) Series(ref storage.SeriesRef, builder *labels.ScratchB
 	if isVirtual {
 		baseName := s.labels().Get("__name__")
 		lb := labels.NewBuilder(s.labels())
-		lb.Set("__name__", baseName+"_"+info.aliasType)
-		if info.aliasType == "bucket" {
+		lb.Set("__name__", baseName+"_"+info.AliasType)
+		if info.AliasType == "bucket" {
 			var upperBound float64
 			s.Lock()
-			if s.lastHistogramValue != nil && info.bucketIdx < len(s.lastHistogramValue.ClassicBuckets) {
-				upperBound = s.lastHistogramValue.ClassicBuckets[info.bucketIdx].UpperBound
-			} else if s.lastFloatHistogramValue != nil && info.bucketIdx < len(s.lastFloatHistogramValue.ClassicBuckets) {
-				upperBound = s.lastFloatHistogramValue.ClassicBuckets[info.bucketIdx].UpperBound
+			if s.lastHistogramValue != nil && info.BucketIdx < len(s.lastHistogramValue.ClassicBuckets) {
+				upperBound = s.lastHistogramValue.ClassicBuckets[info.BucketIdx].UpperBound
+			} else if s.lastFloatHistogramValue != nil && info.BucketIdx < len(s.lastFloatHistogramValue.ClassicBuckets) {
+				upperBound = s.lastFloatHistogramValue.ClassicBuckets[info.BucketIdx].UpperBound
 			}
 			s.Unlock()
 			leStr := labels.FormatOpenMetricsFloat(upperBound)
@@ -566,13 +566,13 @@ func (h *headChunkReader) ChunkOrIterableWithCopy(meta chunks.Meta) (chunkenc.Ch
 func (h *headChunkReader) chunk(meta chunks.Meta, copyLastChunk bool) (chunkenc.Chunk, int64, error) {
 	sid, cid, isOOO := unpackHeadChunkRef(meta.Ref)
 
-	isVirtual := uint64(sid)&virtualSeriesMask != 0
+	isVirtual := uint64(sid)&VirtualSeriesMask != 0
 	var baseRef chunks.HeadSeriesRef
-	var info virtualSeriesInfo
+	var info VirtualSeriesInfo
 
 	if isVirtual {
-		info = unpackVirtualSeriesRef(storage.SeriesRef(sid))
-		baseRef = chunks.HeadSeriesRef(info.baseRef)
+		info = UnpackVirtualSeriesRef(storage.SeriesRef(sid))
+		baseRef = chunks.HeadSeriesRef(info.BaseRef)
 	} else {
 		baseRef = sid
 	}
@@ -899,7 +899,7 @@ func appendVirtualSeriesChunks(s *memSeries, virtualRef storage.SeriesRef, mint,
 
 type virtualChunk struct {
 	chunkenc.Chunk
-	info virtualSeriesInfo
+	info VirtualSeriesInfo
 }
 
 func (virtualChunk) Encoding() chunkenc.Encoding {
@@ -917,7 +917,7 @@ func (c virtualChunk) Iterator(reuseIter chunkenc.Iterator) chunkenc.Iterator {
 
 type virtualIterator struct {
 	base chunkenc.Iterator
-	info virtualSeriesInfo
+	info VirtualSeriesInfo
 	err  error
 }
 
@@ -974,16 +974,16 @@ func (it *virtualIterator) projectValue() (int64, float64, error) {
 		return t, fh.Sum, nil
 	}
 
-	switch it.info.aliasType {
+	switch it.info.AliasType {
 	case "sum":
 		return t, fh.Sum, nil
 	case "count":
 		return t, fh.Count, nil
 	case "bucket":
-		if it.info.bucketIdx < len(fh.ClassicBuckets) {
-			return t, fh.ClassicBuckets[it.info.bucketIdx].CumulativeCount, nil
+		if it.info.BucketIdx < len(fh.ClassicBuckets) {
+			return t, fh.ClassicBuckets[it.info.BucketIdx].CumulativeCount, nil
 		}
 		return t, 0, nil
 	}
-	return t, 0, fmt.Errorf("unknown alias type: %s", it.info.aliasType)
+	return t, 0, fmt.Errorf("unknown alias type: %s", it.info.AliasType)
 }

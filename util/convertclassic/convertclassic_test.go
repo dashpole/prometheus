@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package convertnhcb
+package convertclassic
 
 import (
 	"math"
@@ -22,7 +22,7 @@ import (
 	"github.com/prometheus/prometheus/model/histogram"
 )
 
-func TestNHCBConvert(t *testing.T) {
+func TestClassicConvert(t *testing.T) {
 	tests := map[string]struct {
 		setup       func() *TempHistogram
 		expectedErr error

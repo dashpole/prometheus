@@ -554,8 +554,8 @@ func TestNHCBParser_NoNHCBWhenExponential(t *testing.T) {
 	cases := []map[string]requirement{
 		// Case 1.
 		{
-			"classic=false, nhcb=false": {expectClassic: true, expectExponential: false, expectNHCB: false},
-			"classic=true, nhcb=false":  {expectClassic: true, expectExponential: false, expectNHCB: false},
+			"classic=false, nhcb=false": {expectClassic: false, expectExponential: false, expectNHCB: true},
+			"classic=true, nhcb=false":  {expectClassic: true, expectExponential: false, expectNHCB: true},
 			"classic=false, nhcb=true":  {expectClassic: false, expectExponential: false, expectNHCB: true},
 			"classic=true, nhcb=true":   {expectClassic: true, expectExponential: false, expectNHCB: true},
 		},

@@ -67,28 +67,28 @@ var (
 	defaultWALReplayConcurrency = runtime.GOMAXPROCS(0)
 )
 
-const virtualSeriesMask uint64 = 1 << 39
+const VirtualSeriesMask uint64 = 1 << 39
 
-type virtualSeriesInfo struct {
-	baseRef   storage.SeriesRef
-	aliasType string // "bucket", "sum", "count"
-	bucketIdx int    // Only used for "bucket"
+type VirtualSeriesInfo struct {
+	BaseRef   storage.SeriesRef
+	AliasType string // "bucket", "sum", "count"
+	BucketIdx int    // Only used for "bucket"
 }
 
-func makeVirtualSeriesRef(baseRef storage.SeriesRef, aliasTypeID uint64) storage.SeriesRef {
-	return baseRef | storage.SeriesRef(aliasTypeID<<32) | storage.SeriesRef(virtualSeriesMask)
+func MakeVirtualSeriesRef(baseRef storage.SeriesRef, aliasTypeID uint64) storage.SeriesRef {
+	return baseRef | storage.SeriesRef(aliasTypeID<<32) | storage.SeriesRef(VirtualSeriesMask)
 }
 
-func unpackVirtualSeriesRef(ref storage.SeriesRef) virtualSeriesInfo {
+func UnpackVirtualSeriesRef(ref storage.SeriesRef) VirtualSeriesInfo {
 	baseRef := ref & 0xFFFFFFFF
 	aliasTypeID := (uint64(ref) >> 32) & 0x7F
 	switch aliasTypeID {
 	case 0:
-		return virtualSeriesInfo{baseRef: baseRef, aliasType: "count"}
+		return VirtualSeriesInfo{BaseRef: baseRef, AliasType: "count"}
 	case 1:
-		return virtualSeriesInfo{baseRef: baseRef, aliasType: "sum"}
+		return VirtualSeriesInfo{BaseRef: baseRef, AliasType: "sum"}
 	default:
-		return virtualSeriesInfo{baseRef: baseRef, aliasType: "bucket", bucketIdx: int(aliasTypeID - 2)}
+		return VirtualSeriesInfo{BaseRef: baseRef, AliasType: "bucket", BucketIdx: int(aliasTypeID - 2)}
 	}
 }
 
@@ -105,14 +105,14 @@ func (h *Head) addClassicPostings(s *memSeries, classicBuckets []histogram.Class
 	// 1. Add _count virtual postings
 	countLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_count").Labels()
 	if h.series.getByHash(countLabels.Hash(), countLabels) == nil {
-		countID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 0)
+		countID := MakeVirtualSeriesRef(storage.SeriesRef(s.ref), 0)
 		h.postings.Add(countID, countLabels)
 	}
 
 	// 2. Add _sum virtual postings
 	sumLabels := labels.NewBuilder(s.lset).Set("__name__", baseName+"_sum").Labels()
 	if h.series.getByHash(sumLabels.Hash(), sumLabels) == nil {
-		sumID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), 1)
+		sumID := MakeVirtualSeriesRef(storage.SeriesRef(s.ref), 1)
 		h.postings.Add(sumID, sumLabels)
 	}
 
@@ -124,7 +124,7 @@ func (h *Head) addClassicPostings(s *memSeries, classicBuckets []histogram.Class
 			Set("le", leStr).
 			Labels()
 		if h.series.getByHash(bucketLabels.Hash(), bucketLabels) == nil {
-			bucketID := makeVirtualSeriesRef(storage.SeriesRef(s.ref), uint64(2+idx))
+			bucketID := MakeVirtualSeriesRef(storage.SeriesRef(s.ref), uint64(2+idx))
 			h.postings.Add(bucketID, bucketLabels)
 		}
 	}
@@ -1767,7 +1767,14 @@ func (h *Head) Delete(ctx context.Context, mint, maxt int64, ms ...*labels.Match
 			return fmt.Errorf("select series: %w", err)
 		}
 
-		series := h.series.getByID(chunks.HeadSeriesRef(p.At()))
+		var series *memSeries
+		isVirtual := uint64(p.At())&VirtualSeriesMask != 0
+		if isVirtual {
+			info := UnpackVirtualSeriesRef(p.At())
+			series = h.series.getByID(chunks.HeadSeriesRef(info.BaseRef))
+		} else {
+			series = h.series.getByID(chunks.HeadSeriesRef(p.At()))
+		}
 		if series == nil {
 			h.logger.Debug("Series not found in Head.Delete")
 			continue

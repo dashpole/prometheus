@@ -183,7 +183,7 @@ func New(b []byte, contentType string, st *labels.SymbolTable, opts ParserOption
 			b,
 			opts.IgnoreNativeHistograms,
 			opts.KeepClassicOnClassicAndNativeHistograms,
-			opts.ConvertClassicHistogramsToNHCB,
+			true,
 			opts.EnableTypeAndUnitLabels,
 			st,
 		), err
@@ -193,8 +193,8 @@ func New(b []byte, contentType string, st *labels.SymbolTable, opts ParserOption
 		return nil, err
 	}
 
-	if baseParser != nil && opts.ConvertClassicHistogramsToNHCB {
-		baseParser = NewNHCBParser(baseParser, st, opts.KeepClassicOnClassicAndNativeHistograms)
+	if baseParser != nil {
+		baseParser = NewClassicToNativeParser(baseParser, st, opts.KeepClassicOnClassicAndNativeHistograms)
 	}
 
 	return baseParser, err

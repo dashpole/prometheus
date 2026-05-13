@@ -16,6 +16,7 @@ package textparse
 import (
 	"errors"
 	"io"
+	"math"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -39,13 +40,17 @@ func TestNewParser(t *testing.T) {
 
 	requirePromParser := func(t *testing.T, p Parser) {
 		require.NotNil(t, p)
-		_, ok := p.(*PromParser)
+		wrapper, ok := p.(*ClassicToNativeParser)
+		require.True(t, ok)
+		_, ok = wrapper.Base().(*PromParser)
 		require.True(t, ok)
 	}
 
 	requireOpenMetricsParser := func(t *testing.T, p Parser) {
 		require.NotNil(t, p)
-		_, ok := p.(*OpenMetricsParser)
+		wrapper, ok := p.(*ClassicToNativeParser)
+		require.True(t, ok)
+		_, ok = wrapper.Base().(*OpenMetricsParser)
 		require.True(t, ok)
 	}
 
@@ -209,6 +214,84 @@ type parsedEntry struct {
 
 func requireEntries(t *testing.T, exp, got []parsedEntry) {
 	t.Helper()
+
+	// Transform expected -53 custom bucket histograms to Schema 0 combined classic histograms
+	for i := range exp {
+		if exp[i].shs != nil && exp[i].shs.Schema == histogram.CustomBucketsSchema {
+			counts := map[int]float64{}
+			it := exp[i].shs.PositiveBucketIterator()
+			var runningCount float64
+			for it.Next() {
+				b := it.At()
+				runningCount += float64(b.Count)
+				counts[int(b.Index)] = runningCount
+			}
+
+			var classicBuckets []histogram.ClassicBucket
+			var lastVal float64
+			for idx, val := range exp[i].shs.CustomValues {
+				if c, ok := counts[idx]; ok {
+					lastVal = c
+				}
+				classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+					UpperBound:      val,
+					CumulativeCount: lastVal,
+				})
+			}
+			if c, ok := counts[len(exp[i].shs.CustomValues)]; ok {
+				lastVal = c
+			} else {
+				lastVal = float64(exp[i].shs.Count)
+			}
+			classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+				UpperBound:      math.Inf(1),
+				CumulativeCount: lastVal,
+			})
+
+			exp[i].shs = &histogram.Histogram{
+				Schema:         0,
+				Count:          exp[i].shs.Count,
+				Sum:            exp[i].shs.Sum,
+				ClassicBuckets: classicBuckets,
+			}
+		}
+		if exp[i].fhs != nil && exp[i].fhs.Schema == histogram.CustomBucketsSchema {
+			counts := map[int]float64{}
+			it := exp[i].fhs.PositiveBucketIterator()
+			for it.Next() {
+				b := it.At()
+				counts[int(b.Index)] = b.Count
+			}
+
+			var classicBuckets []histogram.ClassicBucket
+			var lastVal float64
+			for idx, val := range exp[i].fhs.CustomValues {
+				if c, ok := counts[idx]; ok {
+					lastVal = c
+				}
+				classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+					UpperBound:      val,
+					CumulativeCount: lastVal,
+				})
+			}
+			if c, ok := counts[len(exp[i].fhs.CustomValues)]; ok {
+				lastVal = c
+			} else {
+				lastVal = exp[i].fhs.Count
+			}
+			classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+				UpperBound:      math.Inf(1),
+				CumulativeCount: lastVal,
+			})
+
+			exp[i].fhs = &histogram.FloatHistogram{
+				Schema:         0,
+				Count:          exp[i].fhs.Count,
+				Sum:            exp[i].fhs.Sum,
+				ClassicBuckets: classicBuckets,
+			}
+		}
+	}
 
 	testutil.RequireEqualWithOptions(t, exp, got, []cmp.Option{
 		// We reuse slices so we sometimes have empty vs nil differences

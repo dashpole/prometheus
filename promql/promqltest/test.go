@@ -42,7 +42,6 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/util/almost"
 	"github.com/prometheus/prometheus/util/annotations"
-	"github.com/prometheus/prometheus/util/convertnhcb"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
 
@@ -928,37 +927,46 @@ func (cmd *loadCmd) append(a storage.AppenderV2) error {
 	return nil
 }
 
+type suffixType int
+
+const (
+	suffixNone suffixType = iota
+	suffixCount
+	suffixSum
+	suffixBucket
+)
+
+func getHistogramMetricBaseName(mName string) (suffixType, string) {
+	if baseName, ok := strings.CutSuffix(mName, "_count"); ok {
+		return suffixCount, baseName
+	}
+	if baseName, ok := strings.CutSuffix(mName, "_sum"); ok {
+		return suffixSum, baseName
+	}
+	if baseName, ok := strings.CutSuffix(mName, "_bucket"); ok {
+		return suffixBucket, baseName
+	}
+	return suffixNone, mName
+}
+
+func getHistogramMetricBase(m labels.Labels, baseName string) labels.Labels {
+	return labels.NewBuilder(m).
+		Set(labels.MetricName, baseName).
+		Del(labels.BucketLabel).
+		Labels()
+}
+
+type tempHistPoint struct {
+	count    float64
+	sum      float64
+	hasCount bool
+	hasSum   bool
+	buckets  map[float64]float64
+}
+
 type tempHistogramWrapper struct {
 	metric        labels.Labels
-	histogramByTs map[int64]convertnhcb.TempHistogram
-}
-
-func newTempHistogramWrapper() tempHistogramWrapper {
-	return tempHistogramWrapper{
-		histogramByTs: map[int64]convertnhcb.TempHistogram{},
-	}
-}
-
-func processClassicHistogramSeries(m labels.Labels, name string, histogramMap map[uint64]tempHistogramWrapper, smpls []sampleST, updateHistogram func(*convertnhcb.TempHistogram, float64)) {
-	m2 := convertnhcb.GetHistogramMetricBase(m, name)
-	m2hash := m2.Hash()
-	histogramWrapper, exists := histogramMap[m2hash]
-	if !exists {
-		histogramWrapper = newTempHistogramWrapper()
-	}
-	histogramWrapper.metric = m2
-	for _, s := range smpls {
-		if s.H != nil {
-			continue
-		}
-		histogram, exists := histogramWrapper.histogramByTs[s.T]
-		if !exists {
-			histogram = convertnhcb.NewTempHistogram()
-		}
-		updateHistogram(&histogram, s.F)
-		histogramWrapper.histogramByTs[s.T] = histogram
-	}
-	histogramMap[m2hash] = histogramWrapper
+	histogramByTs map[int64]*tempHistPoint
 }
 
 // If classic histograms are defined, convert them into native histograms with custom
@@ -971,54 +979,84 @@ func (cmd *loadCmd) appendCustomHistogram(a storage.AppenderV2) error {
 	for hash, smpls := range cmd.defs {
 		m := cmd.metrics[hash]
 		mName := m.Get(labels.MetricName)
-		suffixType, name := convertnhcb.GetHistogramMetricBaseName(mName)
-		switch suffixType {
-		case convertnhcb.SuffixBucket:
-			if !m.Has(labels.BucketLabel) {
-				panic(fmt.Sprintf("expected bucket label in metric %s", m))
+		stype, baseName := getHistogramMetricBaseName(mName)
+		if stype == suffixNone {
+			continue
+		}
+		m2 := getHistogramMetricBase(m, baseName)
+		m2hash := m2.Hash()
+
+		wrapper, exists := histogramMap[m2hash]
+		if !exists {
+			wrapper = tempHistogramWrapper{
+				metric:        m2,
+				histogramByTs: map[int64]*tempHistPoint{},
 			}
-			le, err := strconv.ParseFloat(m.Get(labels.BucketLabel), 64)
-			if err != nil || math.IsNaN(le) {
+		}
+
+		for _, s := range smpls {
+			if s.H != nil {
 				continue
 			}
-			processClassicHistogramSeries(m, name, histogramMap, smpls, func(histogram *convertnhcb.TempHistogram, f float64) {
-				_ = histogram.SetBucketCount(le, f)
-			})
-		case convertnhcb.SuffixCount:
-			processClassicHistogramSeries(m, name, histogramMap, smpls, func(histogram *convertnhcb.TempHistogram, f float64) {
-				_ = histogram.SetCount(f)
-			})
-		case convertnhcb.SuffixSum:
-			processClassicHistogramSeries(m, name, histogramMap, smpls, func(histogram *convertnhcb.TempHistogram, f float64) {
-				_ = histogram.SetSum(f)
-			})
+			point, exists := wrapper.histogramByTs[s.T]
+			if !exists {
+				point = &tempHistPoint{buckets: map[float64]float64{}}
+				wrapper.histogramByTs[s.T] = point
+			}
+			switch stype {
+			case suffixCount:
+				point.count = s.F
+				point.hasCount = true
+			case suffixSum:
+				point.sum = s.F
+				point.hasSum = true
+			case suffixBucket:
+				if !m.Has(labels.BucketLabel) {
+					panic(fmt.Sprintf("expected bucket label in metric %s", m))
+				}
+				le, err := strconv.ParseFloat(m.Get(labels.BucketLabel), 64)
+				if err == nil && !math.IsNaN(le) {
+					point.buckets[le] = s.F
+				}
+			}
 		}
+		histogramMap[m2hash] = wrapper
 	}
 
 	// Convert the collated classic histogram data into native histograms
 	// with custom bounds and append them to the storage.
-	for _, histogramWrapper := range histogramMap {
-		samples := make([]promql.Sample, 0, len(histogramWrapper.histogramByTs))
-		for t, histogram := range histogramWrapper.histogramByTs {
-			h, fh, err := histogram.Convert()
-			if err != nil {
-				return err
+	for _, wrapper := range histogramMap {
+		samples := make([]promql.Sample, 0, len(wrapper.histogramByTs))
+		for t, point := range wrapper.histogramByTs {
+			if !point.hasCount && !point.hasSum && len(point.buckets) == 0 {
+				continue
 			}
-			if fh == nil {
-				if err := h.Validate(); err != nil {
-					return err
-				}
-				fh = h.ToFloat(nil)
+
+			var classicBuckets []histogram.ClassicBucket
+			for le, c := range point.buckets {
+				classicBuckets = append(classicBuckets, histogram.ClassicBucket{
+					UpperBound:      le,
+					CumulativeCount: c,
+				})
+			}
+			sort.Slice(classicBuckets, func(i, j int) bool {
+				return classicBuckets[i].UpperBound < classicBuckets[j].UpperBound
+			})
+
+			fh := &histogram.FloatHistogram{
+				Schema:         0,
+				Count:          point.count,
+				Sum:            point.sum,
+				ClassicBuckets: classicBuckets,
 			}
 			if err := fh.Validate(); err != nil {
 				return err
 			}
-			s := promql.Sample{T: t, H: fh}
-			samples = append(samples, s)
+			samples = append(samples, promql.Sample{T: t, H: fh})
 		}
 		sort.Slice(samples, func(i, j int) bool { return samples[i].T < samples[j].T })
 		for _, s := range samples {
-			if err := appendSample(a, sampleST{Sample: s}, histogramWrapper.metric); err != nil {
+			if err := appendSample(a, sampleST{Sample: s}, wrapper.metric); err != nil {
 				return err
 			}
 		}

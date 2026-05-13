@@ -29,7 +29,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	dto "github.com/prometheus/prometheus/prompb/io/prometheus/client"
 	"github.com/prometheus/prometheus/schema"
-	"github.com/prometheus/prometheus/util/convertnhcb"
+	"github.com/prometheus/prometheus/util/convertclassic"
 )
 
 // ProtobufParser parses the old Prometheus protobuf format and present it
@@ -76,7 +76,7 @@ type ProtobufParser struct {
 	// Whether to convert classic histograms to native histograms with custom buckets.
 	convertClassicHistogramsToNHCB bool
 	// Reusable classic to NHCB converter.
-	tmpNHCB convertnhcb.TempHistogram
+	tmpNHCB convertclassic.TempHistogram
 	// We need to preload NHCB since we cannot do error handling in Histogram().
 	nhcbH  *histogram.Histogram
 	nhcbFH *histogram.FloatHistogram
@@ -100,7 +100,7 @@ func NewProtobufParser(
 		parseClassicHistograms:         parseClassicHistograms,
 		enableTypeAndUnitLabels:        enableTypeAndUnitLabels,
 		convertClassicHistogramsToNHCB: convertClassicHistogramsToNHCB,
-		tmpNHCB:                        convertnhcb.NewTempHistogram(),
+		tmpNHCB:                        convertclassic.NewTempHistogram(),
 	}
 }
 

@@ -842,22 +842,63 @@ outer:
 }
 
 func (t *QueueManager) AppendHistograms(histograms []record.RefHistogramSample) bool {
-	if !t.sendNativeHistograms {
-		return true
-	}
 	currentTime := time.Now()
-outer:
+	var classicSamples []record.RefSample
+	var nativeHistograms []record.RefHistogramSample
+
 	for _, h := range histograms {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), h.T) {
 			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
 			continue
 		}
-		if t.protoMsg == remoteapi.WriteV1MessageType && h.H != nil && h.H.Schema == histogram.CustomBucketsSchema {
-			// We cannot send native histograms with custom buckets (NHCB) via remote write v1.
-			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
-			t.logger.Warn("Dropped native histogram with custom buckets (NHCB) as remote write v1 does not support itB", "ref", h.Ref)
-			continue
+
+		if h.H != nil && len(h.H.ClassicBuckets) > 0 {
+			t.registerVirtualLabels(h.Ref, h.H.ClassicBuckets)
+			classicSamples = append(classicSamples, record.RefSample{
+				Ref: makeVirtualSeriesRef(h.Ref, 0),
+				ST:  h.ST,
+				T:   h.T,
+				V:   float64(h.H.Count),
+			})
+			classicSamples = append(classicSamples, record.RefSample{
+				Ref: makeVirtualSeriesRef(h.Ref, 1),
+				ST:  h.ST,
+				T:   h.T,
+				V:   h.H.Sum,
+			})
+			for idx, cb := range h.H.ClassicBuckets {
+				classicSamples = append(classicSamples, record.RefSample{
+					Ref: makeVirtualSeriesRef(h.Ref, uint64(2+idx)),
+					ST:  h.ST,
+					T:   h.T,
+					V:   cb.CumulativeCount,
+				})
+			}
 		}
+
+		if t.sendNativeHistograms {
+			if t.protoMsg == remoteapi.WriteV1MessageType && h.H != nil && h.H.Schema == histogram.CustomBucketsSchema {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
+				t.logger.Warn("Dropped native histogram with custom buckets (NHCB) as remote write v1 does not support itB", "ref", h.Ref)
+				continue
+			}
+			nativeHistograms = append(nativeHistograms, h)
+		}
+	}
+
+	success := true
+	if len(classicSamples) > 0 {
+		success = t.Append(classicSamples) && success
+	}
+	if len(nativeHistograms) > 0 {
+		success = t.appendNativeHistograms(nativeHistograms) && success
+	}
+	return success
+}
+
+func (t *QueueManager) appendNativeHistograms(histograms []record.RefHistogramSample) bool {
+outer:
+	for _, h := range histograms {
 		t.seriesMtx.Lock()
 		lbls, ok := t.seriesLabels[h.Ref]
 		if !ok {
@@ -884,10 +925,9 @@ outer:
 			if t.shards.enqueue(h.Ref, timeSeries{
 				seriesLabels: lbls,
 				metadata:     meta,
-				// TODO(bwplotka): Populate ST once histogram Ref has it.
-				timestamp: h.T,
-				histogram: h.H,
-				sType:     tHistogram,
+				timestamp:    h.T,
+				histogram:    h.H,
+				sType:        tHistogram,
 			}) {
 				continue outer
 			}
@@ -904,22 +944,63 @@ outer:
 }
 
 func (t *QueueManager) AppendFloatHistograms(floatHistograms []record.RefFloatHistogramSample) bool {
-	if !t.sendNativeHistograms {
-		return true
-	}
 	currentTime := time.Now()
-outer:
+	var classicSamples []record.RefSample
+	var nativeFloatHistograms []record.RefFloatHistogramSample
+
 	for _, h := range floatHistograms {
 		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), h.T) {
 			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
 			continue
 		}
-		if t.protoMsg == remoteapi.WriteV1MessageType && h.FH != nil && h.FH.Schema == histogram.CustomBucketsSchema {
-			// We cannot send native histograms with custom buckets (NHCB) via remote write v1.
-			t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
-			t.logger.Warn("Dropped float native histogram with custom buckets (NHCB) as remote write v1 does not support itB", "ref", h.Ref)
-			continue
+
+		if h.FH != nil && len(h.FH.ClassicBuckets) > 0 {
+			t.registerVirtualLabels(h.Ref, h.FH.ClassicBuckets)
+			classicSamples = append(classicSamples, record.RefSample{
+				Ref: makeVirtualSeriesRef(h.Ref, 0),
+				ST:  h.ST,
+				T:   h.T,
+				V:   h.FH.Count,
+			})
+			classicSamples = append(classicSamples, record.RefSample{
+				Ref: makeVirtualSeriesRef(h.Ref, 1),
+				ST:  h.ST,
+				T:   h.T,
+				V:   h.FH.Sum,
+			})
+			for idx, cb := range h.FH.ClassicBuckets {
+				classicSamples = append(classicSamples, record.RefSample{
+					Ref: makeVirtualSeriesRef(h.Ref, uint64(2+idx)),
+					ST:  h.ST,
+					T:   h.T,
+					V:   cb.CumulativeCount,
+				})
+			}
 		}
+
+		if t.sendNativeHistograms {
+			if t.protoMsg == remoteapi.WriteV1MessageType && h.FH != nil && h.FH.Schema == histogram.CustomBucketsSchema {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
+				t.logger.Warn("Dropped float native histogram with custom buckets (NHCB) as remote write v1 does not support itB", "ref", h.Ref)
+				continue
+			}
+			nativeFloatHistograms = append(nativeFloatHistograms, h)
+		}
+	}
+
+	success := true
+	if len(classicSamples) > 0 {
+		success = t.Append(classicSamples) && success
+	}
+	if len(nativeFloatHistograms) > 0 {
+		success = t.appendNativeFloatHistograms(nativeFloatHistograms) && success
+	}
+	return success
+}
+
+func (t *QueueManager) appendNativeFloatHistograms(floatHistograms []record.RefFloatHistogramSample) bool {
+outer:
+	for _, h := range floatHistograms {
 		t.seriesMtx.Lock()
 		lbls, ok := t.seriesLabels[h.Ref]
 		if !ok {
@@ -944,9 +1025,8 @@ outer:
 			default:
 			}
 			if t.shards.enqueue(h.Ref, timeSeries{
-				seriesLabels: lbls,
-				metadata:     meta,
-				// TODO(bwplotka): Populate ST once histogram Ref has it.
+				seriesLabels:   lbls,
+				metadata:       meta,
 				timestamp:      h.T,
 				floatHistogram: h.FH,
 				sType:          tFloatHistogram,
@@ -2317,4 +2397,48 @@ func createBatchSpan(ctx context.Context, sc sendBatchContext, remoteName, remot
 		span.SetAttributes(attribute.Int("histograms", sc.histogramCount))
 	}
 	return ctx, span
+}
+
+func (t *QueueManager) registerVirtualLabels(baseRef chunks.HeadSeriesRef, classicBuckets []histogram.ClassicBucket) {
+	t.seriesMtx.Lock()
+	defer t.seriesMtx.Unlock()
+
+	baseLabels, ok := t.seriesLabels[baseRef]
+	if !ok {
+		return
+	}
+	baseName := baseLabels.Get("__name__")
+	if baseName == "" {
+		return
+	}
+
+	// Register _count labels
+	countRef := makeVirtualSeriesRef(baseRef, 0)
+	if _, ok := t.seriesLabels[countRef]; !ok {
+		t.seriesLabels[countRef] = labels.NewBuilder(baseLabels).Set("__name__", baseName+"_count").Labels()
+	}
+
+	// Register _sum labels
+	sumRef := makeVirtualSeriesRef(baseRef, 1)
+	if _, ok := t.seriesLabels[sumRef]; !ok {
+		t.seriesLabels[sumRef] = labels.NewBuilder(baseLabels).Set("__name__", baseName+"_sum").Labels()
+	}
+
+	// Register _bucket labels
+	for idx, cb := range classicBuckets {
+		bucketRef := makeVirtualSeriesRef(baseRef, uint64(2+idx))
+		if _, ok := t.seriesLabels[bucketRef]; !ok {
+			leStr := labels.FormatOpenMetricsFloat(cb.UpperBound)
+			t.seriesLabels[bucketRef] = labels.NewBuilder(baseLabels).
+				Set("__name__", baseName+"_bucket").
+				Set("le", leStr).
+				Labels()
+		}
+	}
+}
+
+const virtualSeriesMask uint64 = 1 << 39
+
+func makeVirtualSeriesRef(baseRef chunks.HeadSeriesRef, aliasTypeID uint64) chunks.HeadSeriesRef {
+	return chunks.HeadSeriesRef(uint64(baseRef) | (aliasTypeID << 32) | virtualSeriesMask)
 }

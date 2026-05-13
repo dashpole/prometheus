@@ -24,7 +24,7 @@ import (
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
 	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/util/convertnhcb"
+	"github.com/prometheus/prometheus/util/convertclassic"
 )
 
 type collectionState int
@@ -33,11 +33,11 @@ const (
 	stateStart collectionState = iota
 	stateCollecting
 	stateEmitting
-	stateInhibiting // Inhibiting NHCB, because there was an exponential histogram with the same labels.
+	stateInhibiting // Inhibiting conversion, because there was an exponential histogram with the same labels.
 )
 
-// The NHCBParser wraps a Parser and converts classic histograms to native
-// histograms with custom buckets.
+// The ClassicToNativeParser wraps a Parser and converts classic histograms to native
+// histograms.
 //
 // Since Parser interface is line based, this parser needs to keep track
 // of the last classic histogram series it saw to collate them into a
@@ -47,7 +47,7 @@ const (
 //   - Only series that have the histogram metadata type are considered for
 //     conversion.
 //   - The classic series are also returned if keepClassicHistograms is true.
-type NHCBParser struct {
+type ClassicToNativeParser struct {
 	// The parser we're wrapping.
 	parser Parser
 	// Option to keep classic histograms along with converted histograms.
@@ -72,24 +72,24 @@ type NHCBParser struct {
 	bName []byte
 	typ   model.MetricType
 
-	// Caches the entry itself if we are inserting a converted NHCB
+	// Caches the entry itself if we are inserting a converted native histogram
 	// halfway through.
 	entry Entry
 	err   error
 
-	// Caches the values and metric for the inserted converted NHCB.
-	bytesNHCB        []byte
-	hNHCB            *histogram.Histogram
-	fhNHCB           *histogram.FloatHistogram
-	lsetNHCB         labels.Labels
-	exemplars        []exemplar.Exemplar
-	stNHCB           int64
-	metricStringNHCB string
+	// Caches the values and metric for the inserted converted native histogram.
+	bytesNative        []byte
+	hNative            *histogram.Histogram
+	fhNative           *histogram.FloatHistogram
+	lsetNative         labels.Labels
+	exemplars          []exemplar.Exemplar
+	stNative           int64
+	metricStringNative string
 
 	// Collates values from the classic histogram series to build
 	// the converted histogram later.
-	tempLsetNHCB      labels.Labels
-	tempNHCB          convertnhcb.TempHistogram
+	tempLsetNative    labels.Labels
+	tempNative        convertclassic.TempHistogram
 	tempExemplars     []exemplar.Exemplar
 	tempExemplarCount int
 	tempST            int64
@@ -103,51 +103,51 @@ type NHCBParser struct {
 	hBuffer []byte
 }
 
-func NewNHCBParser(p Parser, st *labels.SymbolTable, keepClassicHistograms bool) Parser {
-	return &NHCBParser{
+func NewClassicToNativeParser(p Parser, st *labels.SymbolTable, keepClassicHistograms bool) Parser {
+	return &ClassicToNativeParser{
 		parser:                p,
 		keepClassicHistograms: keepClassicHistograms,
 		builder:               labels.NewScratchBuilderWithSymbolTable(st, 16),
-		tempNHCB:              convertnhcb.NewTempHistogram(),
+		tempNative:            convertclassic.NewTempHistogram(),
 	}
 }
 
-func (p *NHCBParser) Series() ([]byte, *int64, float64) {
+func (p *ClassicToNativeParser) Series() ([]byte, *int64, float64) {
 	return p.bytes, p.ts, p.value
 }
 
-func (p *NHCBParser) Histogram() ([]byte, *int64, *histogram.Histogram, *histogram.FloatHistogram) {
+func (p *ClassicToNativeParser) Histogram() ([]byte, *int64, *histogram.Histogram, *histogram.FloatHistogram) {
 	if p.state == stateEmitting {
-		return p.bytesNHCB, p.ts, p.hNHCB, p.fhNHCB
+		return p.bytesNative, p.ts, p.hNative, p.fhNative
 	}
 	return p.bytes, p.ts, p.h, p.fh
 }
 
-func (p *NHCBParser) Help() ([]byte, []byte) {
+func (p *ClassicToNativeParser) Help() ([]byte, []byte) {
 	return p.parser.Help()
 }
 
-func (p *NHCBParser) Type() ([]byte, model.MetricType) {
+func (p *ClassicToNativeParser) Type() ([]byte, model.MetricType) {
 	return p.bName, p.typ
 }
 
-func (p *NHCBParser) Unit() ([]byte, []byte) {
+func (p *ClassicToNativeParser) Unit() ([]byte, []byte) {
 	return p.parser.Unit()
 }
 
-func (p *NHCBParser) Comment() []byte {
+func (p *ClassicToNativeParser) Comment() []byte {
 	return p.parser.Comment()
 }
 
-func (p *NHCBParser) Labels(l *labels.Labels) {
+func (p *ClassicToNativeParser) Labels(l *labels.Labels) {
 	if p.state == stateEmitting {
-		*l = p.lsetNHCB
+		*l = p.lsetNative
 		return
 	}
 	*l = p.lset
 }
 
-func (p *NHCBParser) Exemplar(ex *exemplar.Exemplar) bool {
+func (p *ClassicToNativeParser) Exemplar(ex *exemplar.Exemplar) bool {
 	if p.state == stateEmitting {
 		if len(p.exemplars) == 0 {
 			return false
@@ -159,7 +159,7 @@ func (p *NHCBParser) Exemplar(ex *exemplar.Exemplar) bool {
 	return p.parser.Exemplar(ex)
 }
 
-func (p *NHCBParser) StartTimestamp() int64 {
+func (p *ClassicToNativeParser) StartTimestamp() int64 {
 	switch p.state {
 	case stateStart, stateInhibiting:
 		if p.entry == EntrySeries || p.entry == EntryHistogram {
@@ -168,19 +168,19 @@ func (p *NHCBParser) StartTimestamp() int64 {
 	case stateCollecting:
 		return p.tempST
 	case stateEmitting:
-		return p.stNHCB
+		return p.stNative
 	}
 	return 0
 }
 
-func (p *NHCBParser) Next() (Entry, error) {
+func (p *ClassicToNativeParser) Next() (Entry, error) {
 	for {
 		if p.state == stateEmitting {
 			p.state = stateStart
 			if p.entry == EntrySeries {
-				isNHCB := p.handleClassicHistogramSeries(p.lset)
-				if isNHCB && !p.keepClassicHistograms {
-					// Do not return the classic histogram series if it was converted to NHCB and we are not keeping classic histograms.
+				isNative := p.handleClassicHistogramSeries(p.lset)
+				if isNative && !p.keepClassicHistograms {
+					// Do not return the classic histogram series if it was converted to native and we are not keeping classic histograms.
 					continue
 				}
 			}
@@ -189,7 +189,7 @@ func (p *NHCBParser) Next() (Entry, error) {
 
 		p.entry, p.err = p.parser.Next()
 		if p.err != nil {
-			if errors.Is(p.err, io.EOF) && p.processNHCB() {
+			if errors.Is(p.err, io.EOF) && p.processNative() {
 				return EntryHistogram, nil
 			}
 			return EntryInvalid, p.err
@@ -198,37 +198,37 @@ func (p *NHCBParser) Next() (Entry, error) {
 		case EntrySeries:
 			p.bytes, p.ts, p.value = p.parser.Series()
 			p.parser.Labels(&p.lset)
-			var isNHCB bool
+			var isNative bool
 			switch p.state {
 			case stateCollecting:
-				if p.differentMetric() && p.processNHCB() {
+				if p.differentMetric() && p.processNative() {
 					// We are collecting classic series, but the next series
 					// has different type or labels. If we can convert what
-					// we have collected so far to NHCB, then we can return it.
+					// we have collected so far to native histogram, then we can return it.
 					return EntryHistogram, nil
 				}
-				isNHCB = p.handleClassicHistogramSeries(p.lset)
+				isNative = p.handleClassicHistogramSeries(p.lset)
 			case stateInhibiting:
 				if p.differentMetric() {
 					// Next has different labels than the previous exponential
 					// histogram so we can start collecting classic histogram
 					// series.
 					p.state = stateStart
-					isNHCB = p.handleClassicHistogramSeries(p.lset)
+					isNative = p.handleClassicHistogramSeries(p.lset)
 				} else {
 					// Next has the same labels as the previous exponential
 					// histogram, so we are still in the inhibiting state and
-					// we should not convert to NHCB.
-					isNHCB = false
+					// we should not convert to native.
+					isNative = false
 				}
 			case stateStart:
-				isNHCB = p.handleClassicHistogramSeries(p.lset)
+				isNative = p.handleClassicHistogramSeries(p.lset)
 			default:
 				// This should not happen.
-				return EntryInvalid, errors.New("unexpected state in NHCBParser")
+				return EntryInvalid, errors.New("unexpected state in ClassicToNativeParser")
 			}
-			if isNHCB && !p.keepClassicHistograms {
-				// Do not return the classic histogram series if it was converted to NHCB and we are not keeping classic histograms.
+			if isNative && !p.keepClassicHistograms {
+				// Do not return the classic histogram series if it was converted to native and we are not keeping classic histograms.
 				continue
 			}
 			return p.entry, p.err
@@ -240,20 +240,20 @@ func (p *NHCBParser) Next() (Entry, error) {
 		case EntryType:
 			p.bName, p.typ = p.parser.Type()
 		}
-		if p.processNHCB() {
+		if p.processNative() {
 			return EntryHistogram, nil
 		}
 		return p.entry, p.err
 	}
 }
 
-// Return true if labels have changed and we should emit the NHCB.
-func (p *NHCBParser) differentMetric() bool {
+// Return true if labels have changed and we should emit the native histogram.
+func (p *ClassicToNativeParser) differentMetric() bool {
 	if p.typ != model.MetricTypeHistogram {
 		// Different metric type.
 		return true
 	}
-	_, name := convertnhcb.GetHistogramMetricBaseName(p.lset.Get(labels.MetricName))
+	_, name := convertclassic.GetHistogramMetricBaseName(p.lset.Get(labels.MetricName))
 	if p.lastHistogramName != name {
 		// Different metric name.
 		return true
@@ -264,50 +264,50 @@ func (p *NHCBParser) differentMetric() bool {
 }
 
 // Save the label set of the classic histogram without suffix and bucket `le` label.
-func (p *NHCBParser) storeClassicLabels(name string) {
+func (p *ClassicToNativeParser) storeClassicLabels(name string) {
 	p.lastHistogramName = name
 	p.lastHistogramLabelsHash, _ = p.lset.HashWithoutLabels(p.hBuffer, labels.BucketLabel)
 }
 
-func (p *NHCBParser) storeExponentialLabels() {
+func (p *ClassicToNativeParser) storeExponentialLabels() {
 	p.lastHistogramName = p.lset.Get(labels.MetricName)
 	p.lastHistogramLabelsHash, _ = p.lset.HashWithoutLabels(p.hBuffer)
 }
 
-// handleClassicHistogramSeries collates the classic histogram series to be converted to NHCB
+// handleClassicHistogramSeries collates the classic histogram series to be converted to native
 // if it is actually a classic histogram series (and not a normal float series) and if there
 // isn't already a native histogram with the same name (assuming it is always processed
 // right before the classic histograms) and returns true if the collation was done.
-func (p *NHCBParser) handleClassicHistogramSeries(lset labels.Labels) bool {
+func (p *ClassicToNativeParser) handleClassicHistogramSeries(lset labels.Labels) bool {
 	if p.typ != model.MetricTypeHistogram {
 		return false
 	}
 	mName := lset.Get(labels.MetricName)
 	// Sanity check to ensure that the TYPE metadata entry name is the same as the base name.
-	suffixType, name := convertnhcb.GetHistogramMetricBaseName(mName)
+	suffixType, name := convertclassic.GetHistogramMetricBaseName(mName)
 	if name != string(p.bName) {
 		return false
 	}
 	switch suffixType {
-	case convertnhcb.SuffixBucket:
+	case convertclassic.SuffixBucket:
 		if !lset.Has(labels.BucketLabel) {
 			// This should not really happen.
 			return false
 		}
 		le, err := strconv.ParseFloat(lset.Get(labels.BucketLabel), 64)
 		if err == nil && !math.IsNaN(le) {
-			p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+			p.processClassicHistogramSeries(lset, name, func(hist *convertclassic.TempHistogram) {
 				_ = hist.SetBucketCount(le, p.value)
 			})
 			return true
 		}
-	case convertnhcb.SuffixCount:
-		p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+	case convertclassic.SuffixCount:
+		p.processClassicHistogramSeries(lset, name, func(hist *convertclassic.TempHistogram) {
 			_ = hist.SetCount(p.value)
 		})
 		return true
-	case convertnhcb.SuffixSum:
-		p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+	case convertclassic.SuffixSum:
+		p.processClassicHistogramSeries(lset, name, func(hist *convertclassic.TempHistogram) {
 			_ = hist.SetSum(p.value)
 		})
 		return true
@@ -315,24 +315,24 @@ func (p *NHCBParser) handleClassicHistogramSeries(lset labels.Labels) bool {
 	return false
 }
 
-func (p *NHCBParser) processClassicHistogramSeries(lset labels.Labels, name string, updateHist func(*convertnhcb.TempHistogram)) {
+func (p *ClassicToNativeParser) processClassicHistogramSeries(lset labels.Labels, name string, updateHist func(*convertclassic.TempHistogram)) {
 	if p.state != stateCollecting {
 		p.storeClassicLabels(name)
 		p.tempST = p.parser.StartTimestamp()
 		p.state = stateCollecting
-		p.tempLsetNHCB = convertnhcb.GetHistogramMetricBase(lset, name)
+		p.tempLsetNative = convertclassic.GetHistogramMetricBase(lset, name)
 	}
 	p.storeExemplars()
-	updateHist(&p.tempNHCB)
+	updateHist(&p.tempNative)
 }
 
-func (p *NHCBParser) storeExemplars() {
+func (p *ClassicToNativeParser) storeExemplars() {
 	for ex := p.nextExemplarPtr(); p.parser.Exemplar(ex); ex = p.nextExemplarPtr() {
 		p.tempExemplarCount++
 	}
 }
 
-func (p *NHCBParser) nextExemplarPtr() *exemplar.Exemplar {
+func (p *ClassicToNativeParser) nextExemplarPtr() *exemplar.Exemplar {
 	switch {
 	case p.tempExemplarCount == len(p.tempExemplars)-1:
 		// Reuse the previously allocated exemplar, it was not filled up.
@@ -346,52 +346,56 @@ func (p *NHCBParser) nextExemplarPtr() *exemplar.Exemplar {
 	return &p.tempExemplars[len(p.tempExemplars)-1]
 }
 
-func (p *NHCBParser) swapExemplars() {
+func (p *ClassicToNativeParser) swapExemplars() {
 	p.exemplars = p.tempExemplars[:p.tempExemplarCount]
 	p.tempExemplars = p.tempExemplars[:0]
 }
 
-// processNHCB converts the collated classic histogram series to NHCB and caches the info
+// processNative converts the collated classic histogram series to native and caches the info
 // to be returned to callers. Returns true if the conversion was successful.
-func (p *NHCBParser) processNHCB() bool {
+func (p *ClassicToNativeParser) processNative() bool {
 	if p.state != stateCollecting {
 		return false
 	}
-	h, fh, err := p.tempNHCB.Convert()
+	h, fh, err := p.tempNative.Convert()
 	if err == nil {
 		if h != nil {
 			if err := h.Validate(); err != nil {
 				return false
 			}
-			p.hNHCB = h
-			p.fhNHCB = nil
+			p.hNative = h
+			p.fhNative = nil
 		} else if fh != nil {
 			if err := fh.Validate(); err != nil {
 				return false
 			}
-			p.hNHCB = nil
-			p.fhNHCB = fh
+			p.hNative = nil
+			p.fhNative = fh
 		}
 
-		lblsWithMetricName := p.tempLsetNHCB.DropReserved(func(n string) bool { return n == labels.MetricName })
+		lblsWithMetricName := p.tempLsetNative.DropReserved(func(n string) bool { return n == labels.MetricName })
 		// Ensure we return `metric` instead of `metric{}` for name only
 		// series, for consistency with wrapped parsers.
 		if lblsWithMetricName.IsEmpty() {
-			p.metricStringNHCB = p.tempLsetNHCB.Get(labels.MetricName)
+			p.metricStringNative = p.tempLsetNative.Get(labels.MetricName)
 		} else {
-			p.metricStringNHCB = p.tempLsetNHCB.Get(labels.MetricName) + lblsWithMetricName.StringNoSpace()
+			p.metricStringNative = p.tempLsetNative.Get(labels.MetricName) + lblsWithMetricName.StringNoSpace()
 		}
 
-		p.bytesNHCB = []byte(p.metricStringNHCB)
-		p.lsetNHCB = p.tempLsetNHCB
+		p.bytesNative = []byte(p.metricStringNative)
+		p.lsetNative = p.tempLsetNative
 		p.swapExemplars()
-		p.stNHCB = p.tempST
+		p.stNative = p.tempST
 		p.state = stateEmitting
 	} else {
 		p.state = stateStart
 	}
-	p.tempNHCB.Reset()
+	p.tempNative.Reset()
 	p.tempExemplarCount = 0
 	p.tempST = 0
 	return err == nil
+}
+
+func (p *ClassicToNativeParser) Base() Parser {
+	return p.parser
 }

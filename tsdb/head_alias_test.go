@@ -78,7 +78,7 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	countRefs, err := index.ExpandPostings(pCount)
 	require.NoError(t, err)
 	require.Len(t, countRefs, 1)
-	require.NotEqual(t, uint64(0), uint64(countRefs[0])&virtualSeriesMask)
+	require.NotEqual(t, uint64(0), uint64(countRefs[0])&VirtualSeriesMask)
 
 	// 3. Verify postings for _bucket alias with le="2.5"!
 	pBucket, err := ir.Postings(context.Background(), "le", "2.5")
@@ -86,7 +86,7 @@ func TestHeadIndexAliasingCombined(t *testing.T) {
 	bucketRefs, err := index.ExpandPostings(pBucket)
 	require.NoError(t, err)
 	require.Len(t, bucketRefs, 1)
-	require.NotEqual(t, uint64(0), uint64(bucketRefs[0])&virtualSeriesMask)
+	require.NotEqual(t, uint64(0), uint64(bucketRefs[0])&VirtualSeriesMask)
 
 	// 4. Verify Series labels spoofing!
 	var builder labels.ScratchBuilder
@@ -180,4 +180,88 @@ func TestWALReplayVirtualPostings(t *testing.T) {
 	require.Equal(t, 10.0, vb)
 	require.Equal(t, chunkenc.ValNone, itBucket.Next())
 	require.False(t, ssBucket.Next())
+}
+
+func TestDeleteVirtualSeries(t *testing.T) {
+	dir := t.TempDir()
+
+	opts := DefaultOptions()
+	opts.RetentionDuration = int64(time.Hour * 24 * 15 / time.Millisecond)
+	opts.NoLockfile = true
+	opts.MinBlockDuration = int64(time.Hour * 24 / time.Millisecond)
+	opts.MaxBlockDuration = int64(time.Hour * 24 / time.Millisecond)
+
+	db, err := Open(dir, nil, nil, opts, nil)
+	require.NoError(t, err)
+	defer func() { require.NoError(t, db.Close()) }()
+
+	hist1 := &histogram.Histogram{
+		Count:         5,
+		Sum:           10.0,
+		ZeroThreshold: 0.001,
+		Schema:        0,
+		ClassicBuckets: []histogram.ClassicBucket{
+			{UpperBound: 1.0, CumulativeCount: 5},
+		},
+	}
+	hist2 := &histogram.Histogram{
+		Count:         10,
+		Sum:           20.0,
+		ZeroThreshold: 0.001,
+		Schema:        0,
+		ClassicBuckets: []histogram.ClassicBucket{
+			{UpperBound: 1.0, CumulativeCount: 10},
+		},
+	}
+	hist3 := &histogram.Histogram{
+		Count:         15,
+		Sum:           30.0,
+		ZeroThreshold: 0.001,
+		Schema:        0,
+		ClassicBuckets: []histogram.ClassicBucket{
+			{UpperBound: 1.0, CumulativeCount: 15},
+		},
+	}
+
+	lset := labels.FromStrings("__name__", "http_request_duration_seconds", "job", "test")
+
+	// Append samples at 1000, 2000, 3000
+	app := db.Appender(context.Background())
+	_, err = app.AppendHistogram(0, lset, 1000, hist1, nil)
+	require.NoError(t, err)
+	_, err = app.AppendHistogram(0, lset, 2000, hist2, nil)
+	require.NoError(t, err)
+	_, err = app.AppendHistogram(0, lset, 3000, hist3, nil)
+	require.NoError(t, err)
+	require.NoError(t, app.Commit())
+
+	// Delete count series for time range 1500 to 2500
+	err = db.Delete(context.Background(), 1500, 2500, labels.MustNewMatcher(labels.MatchEqual, "__name__", "http_request_duration_seconds_count"))
+	require.NoError(t, err)
+
+	// Query to verify tombstone deletion
+	q, err := db.Querier(0, 4000)
+	require.NoError(t, err)
+	defer q.Close()
+
+	ss := q.Select(context.Background(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "http_request_duration_seconds_count"))
+	require.True(t, ss.Next())
+	it := ss.At().Iterator(nil)
+
+	// First sample at 1000 should be returned
+	require.Equal(t, chunkenc.ValFloat, it.Next())
+	t1, v1 := it.At()
+	require.Equal(t, int64(1000), t1)
+	require.Equal(t, 5.0, v1)
+
+	// Second sample at 2000 should be filtered out by tombstone!
+	// Third sample at 3000 should be returned
+	require.Equal(t, chunkenc.ValFloat, it.Next())
+	t3, v3 := it.At()
+	require.Equal(t, int64(3000), t3)
+	require.Equal(t, 15.0, v3)
+
+	// No more samples
+	require.Equal(t, chunkenc.ValNone, it.Next())
+	require.False(t, ss.Next())
 }
