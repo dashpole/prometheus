@@ -418,6 +418,13 @@ func (h *Histogram) ToFloat(fh *FloatHistogram) *FloatHistogram {
 		fh.PositiveBuckets[i] = currentPositive
 	}
 
+	if len(h.ClassicBuckets) != 0 {
+		fh.ClassicBuckets = make([]ClassicBucket, len(h.ClassicBuckets))
+		copy(fh.ClassicBuckets, h.ClassicBuckets)
+	} else {
+		fh.ClassicBuckets = nil
+	}
+
 	return fh
 }
 
