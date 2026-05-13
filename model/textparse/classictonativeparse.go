@@ -15,10 +15,8 @@ package textparse
 
 import (
 	"errors"
-	"fmt"
 	"io"
 	"math"
-	"os"
 	"strconv"
 
 	"github.com/prometheus/common/model"
@@ -392,20 +390,10 @@ func (p *ClassicToNativeParser) processNative() bool {
 	} else {
 		p.state = stateStart
 	}
-	logToFile("PARSER CONVERTED NATIVE HISTOGRAM: name %s, err %v", p.tempLsetNative.Get(labels.MetricName), err)
 	p.tempNative.Reset()
 	p.tempExemplarCount = 0
 	p.tempST = 0
 	return err == nil
-}
-
-func logToFile(format string, args ...any) {
-	f, err := os.OpenFile("/tmp/prometheus_debug.log", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, format+"\n", args...)
 }
 
 func (p *ClassicToNativeParser) Base() Parser {
