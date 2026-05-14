@@ -32,10 +32,12 @@ func writeHistogramChunkLayout(
 	if histogram.IsCustomBucketsSchema(schema) {
 		putHistogramChunkLayoutCustomBounds(b, customValues)
 	}
-	putHistogramChunkLayoutCustomBounds(b, classicValues)
+	if len(classicValues) > 0 {
+		putHistogramChunkLayoutCustomBounds(b, classicValues)
+	}
 }
 
-func readHistogramChunkLayout(b *bstreamReader) (
+func readHistogramChunkLayout(b *bstreamReader, hasClassic bool) (
 	schema int32, zeroThreshold float64,
 	positiveSpans, negativeSpans []histogram.Span,
 	customValues []float64,
@@ -70,9 +72,11 @@ func readHistogramChunkLayout(b *bstreamReader) (
 		}
 	}
 
-	classicValues, err = readHistogramChunkLayoutCustomBounds(b)
-	if err != nil {
-		return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
+	if hasClassic {
+		classicValues, err = readHistogramChunkLayoutCustomBounds(b)
+		if err != nil {
+			return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err
+		}
 	}
 
 	return schema, zeroThreshold, positiveSpans, negativeSpans, customValues, classicValues, err

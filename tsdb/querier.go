@@ -170,7 +170,7 @@ func NewBlockQuerier(b BlockReader, mint, maxt int64) (storage.Querier, error) {
 }
 
 func (q *blockQuerier) Select(ctx context.Context, sortSeries bool, hints *storage.SelectHints, ms ...*labels.Matcher) storage.SeriesSet {
-	return selectSeriesSet(ctx, sortSeries, hints, ms, q.index, q.chunks, q.tombstones, q.mint, q.maxt)
+	return selectSeriesSet(ctx, sortSeries, hints, ms, q.blockID, q.index, q.chunks, q.tombstones, q.mint, q.maxt)
 }
 
 // chunkCacheToggler is an optional interface implemented by chunk readers that
@@ -180,27 +180,129 @@ type chunkCacheToggler interface {
 	EnableChunkCache()
 }
 
+func labelsetsMatch(a, b labels.Labels) bool {
+	if a.Len() != b.Len() {
+		return false
+	}
+	var aLE, bLE string
+	var aHasLE, bHasLE bool
+
+	match := true
+	a.Range(func(la labels.Label) {
+		if la.Name == "le" {
+			aLE = la.Value
+			aHasLE = true
+			return
+		}
+		val := b.Get(la.Name)
+		if val != la.Value {
+			match = false
+		}
+	})
+	if !match {
+		return false
+	}
+
+	b.Range(func(lb labels.Label) {
+		if lb.Name == "le" {
+			bLE = lb.Value
+			bHasLE = true
+			return
+		}
+	})
+
+	if aHasLE != bHasLE {
+		return false
+	}
+	if !aHasLE {
+		return true
+	}
+
+	fa, erra := strconv.ParseFloat(aLE, 64)
+	fb, errb := strconv.ParseFloat(bLE, 64)
+	if erra != nil || errb != nil {
+		return aLE == bLE
+	}
+	return fa == fb
+}
+
 func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.SelectHints, ms []*labels.Matcher,
-	index IndexReader, chunks ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
+	blockID ulid.ULID, ir IndexReader, cr ChunkReader, tombstones tombstones.Reader, mint, maxt int64,
 ) storage.SeriesSet {
 	disableTrimming := false
 	sharded := hints != nil && hints.ShardCount > 0
 
 	if hints != nil && hints.Step > 0 {
-		if toggler, ok := chunks.(chunkCacheToggler); ok {
+		if toggler, ok := cr.(chunkCacheToggler); ok {
 			toggler.EnableChunkCache()
 		}
 	}
 
-	p, err := PostingsForMatchers(ctx, index, ms...)
+	p, err := PostingsForMatchers(ctx, ir, ms...)
 	if err != nil {
 		return storage.ErrSeriesSet(err)
 	}
+
+	// Deduplicate real and virtual series postings to avoid collisions.
+	var refs []storage.SeriesRef
+	for p.Next() {
+		refs = append(refs, p.At())
+	}
+	if p.Err() != nil {
+		return storage.ErrSeriesSet(p.Err())
+	}
+
+	type entry struct {
+		ref  storage.SeriesRef
+		lbls labels.Labels
+	}
+	entries := make([]entry, 0, len(refs))
+	var builder labels.ScratchBuilder
+	var dummyChks []chunks.Meta
+	for _, ref := range refs {
+		builder.Reset()
+		if err := ir.Series(ref, &builder, &dummyChks); err != nil {
+			continue
+		}
+		entries = append(entries, entry{
+			ref:  ref,
+			lbls: builder.Labels(),
+		})
+	}
+
+	var realEntries []entry
+	for _, e := range entries {
+		if uint64(e.ref)&VirtualSeriesMask == 0 {
+			realEntries = append(realEntries, e)
+		}
+	}
+
+	filteredRefs := make([]storage.SeriesRef, 0, len(entries))
+	for _, e := range entries {
+		isVirtual := uint64(e.ref)&VirtualSeriesMask != 0
+		if !isVirtual {
+			filteredRefs = append(filteredRefs, e.ref)
+			continue
+		}
+		// If this is virtual, only keep if there is no real entry that matches its labels!
+		hasRealMatch := false
+		for _, re := range realEntries {
+			if labelsetsMatch(re.lbls, e.lbls) {
+				hasRealMatch = true
+				break
+			}
+		}
+		if !hasRealMatch {
+			filteredRefs = append(filteredRefs, e.ref)
+		}
+	}
+	p = index.NewListPostings(filteredRefs)
+
 	if sharded {
-		p = index.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
+		p = ir.ShardedPostings(p, hints.ShardIndex, hints.ShardCount)
 	}
 	if sortSeries {
-		p = index.SortedPostings(p)
+		p = ir.SortedPostings(p)
 	}
 
 	if hints != nil {
@@ -209,11 +311,11 @@ func selectSeriesSet(ctx context.Context, sortSeries bool, hints *storage.Select
 		disableTrimming = hints.DisableTrimming
 		if hints.Func == "series" {
 			// When you're only looking up metadata (for example series API), you don't need to load any chunks.
-			return newBlockSeriesSet(index, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
+			return newBlockSeriesSet(blockID, ir, newNopChunkReader(), tombstones, p, mint, maxt, disableTrimming)
 		}
 	}
 
-	return newBlockSeriesSet(index, chunks, tombstones, p, mint, maxt, disableTrimming)
+	return newBlockSeriesSet(blockID, ir, cr, tombstones, p, mint, maxt, disableTrimming)
 }
 
 // blockChunkQuerier provides chunk querying access to a single block database.
@@ -771,6 +873,7 @@ func (p *populateWithDelGenericSeriesIterator) next(copyHeadChunk bool) bool {
 func (p *populateWithDelGenericSeriesIterator) Err() error { return p.err }
 
 type blockSeriesEntry struct {
+	index   IndexReader
 	chunks  ChunkReader
 	blockID ulid.ULID
 	seriesData
@@ -800,7 +903,26 @@ func (s *blockSeriesEntry) Iterator(it chunkenc.Iterator) chunkenc.Iterator {
 	}
 	pi.reset(s.blockID, s.chunks, s.chks, s.intervals)
 
-	if aliasType != "" {
+	isVirtual := false
+	if aliasType != "" && len(s.chks) > 0 {
+		isHead := s.blockID == headULID || s.blockID == rangeHeadULID
+		if isHead {
+			sid, _ := chunks.HeadChunkRef(s.chks[0].Ref).Unpack()
+			if uint64(sid)&VirtualSeriesMask != 0 {
+				isVirtual = true
+			}
+		} else {
+			chk, _, err := s.chunks.ChunkOrIterable(s.chks[0])
+			if err == nil && chk != nil {
+				enc := chk.Encoding()
+				if enc == chunkenc.EncHistogram || enc == chunkenc.EncFloatHistogram {
+					isVirtual = true
+				}
+			}
+		}
+	}
+
+	if isVirtual {
 		return &blockVirtualIterator{
 			base:       pi,
 			aliasType:  aliasType,
@@ -1172,9 +1294,10 @@ type blockSeriesSet struct {
 	blockBaseSeriesSet
 }
 
-func newBlockSeriesSet(i IndexReader, c ChunkReader, t tombstones.Reader, p index.Postings, mint, maxt int64, disableTrimming bool) storage.SeriesSet {
+func newBlockSeriesSet(blockID ulid.ULID, i IndexReader, c ChunkReader, t tombstones.Reader, p index.Postings, mint, maxt int64, disableTrimming bool) storage.SeriesSet {
 	return &blockSeriesSet{
 		blockBaseSeriesSet{
+			blockID:         blockID,
 			index:           i,
 			chunks:          c,
 			tombstones:      t,
@@ -1189,6 +1312,7 @@ func newBlockSeriesSet(i IndexReader, c ChunkReader, t tombstones.Reader, p inde
 func (b *blockSeriesSet) At() storage.Series {
 	// At can be looped over before iterating, so save the current values locally.
 	return &blockSeriesEntry{
+		index:      b.index,
 		chunks:     b.chunks,
 		blockID:    b.blockID,
 		seriesData: b.curr,

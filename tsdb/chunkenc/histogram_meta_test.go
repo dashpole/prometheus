@@ -526,7 +526,7 @@ func TestWriteReadHistogramChunkLayout(t *testing.T) {
 	bsr := newBReader(bs.bytes())
 
 	for _, want := range layouts {
-		gotSchema, gotZeroThreshold, gotPositiveSpans, gotNegativeSpans, gotCustomBounds, gotClassicBounds, err := readHistogramChunkLayout(&bsr)
+		gotSchema, gotZeroThreshold, gotPositiveSpans, gotNegativeSpans, gotCustomBounds, gotClassicBounds, err := readHistogramChunkLayout(&bsr, len(want.classicValues) > 0)
 		require.NoError(t, err)
 		require.Equal(t, want.schema, gotSchema)
 		require.Equal(t, want.zeroThreshold, gotZeroThreshold)

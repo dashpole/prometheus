@@ -80,6 +80,8 @@ const (
 	UnknownCounterReset CounterResetHeader = 0b00000000
 	// CounterResetHeaderMask is the mask to get the counter reset header bits.
 	CounterResetHeaderMask byte = 0b11000000
+	// HasClassicBucketsMask indicates if classic buckets are stored.
+	HasClassicBucketsMask byte = 0b00000001
 	// Position within the header bytes at the start of the stream.
 	histogramFlagPos = 2
 	// Total header size.
@@ -161,6 +163,7 @@ func newHistogramIterator(b []byte) *histogramIterator {
 		t:        math.MinInt64,
 	}
 	it.counterResetHeader = CounterResetHeader(b[histogramFlagPos] & CounterResetHeaderMask)
+	it.hasClassic = (b[histogramFlagPos] & HasClassicBucketsMask) != 0
 	return it
 }
 
@@ -571,6 +574,7 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 			for i, cb := range h.ClassicBuckets {
 				classicBounds[i] = cb.UpperBound
 			}
+			a.b.bytes()[histogramFlagPos] |= HasClassicBucketsMask
 		}
 		writeHistogramChunkLayout(a.b, h.Schema, h.ZeroThreshold, h.PositiveSpans, h.NegativeSpans, h.CustomValues, classicBounds)
 		a.schema = h.Schema
@@ -908,6 +912,7 @@ type histogramIterator struct {
 	numRead  uint16
 
 	counterResetHeader CounterResetHeader
+	hasClassic         bool
 
 	// Layout:
 	schema         int32
@@ -960,43 +965,70 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	if value.IsStaleNaN(it.sum) {
 		return it.t, &histogram.Histogram{Sum: it.sum}
 	}
-	if h == nil {
-		it.atHistogramCalled = true
-		var classicBuckets []histogram.ClassicBucket
-		if len(it.classicValues) > 0 {
-			classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
-			for idx, bound := range it.classicValues {
-				classicBuckets[idx] = histogram.ClassicBucket{
-					UpperBound:      bound,
-					CumulativeCount: float64(it.cBuckets[idx]),
-				}
+
+	var classicBuckets []histogram.ClassicBucket
+	var customValues []float64
+	var positiveSpans []histogram.Span
+	var positiveBuckets []int64
+
+	schema := it.schema
+	count := it.cnt
+
+	if len(it.classicValues) > 0 {
+		classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
+		for idx, bound := range it.classicValues {
+			classicBuckets[idx] = histogram.ClassicBucket{
+				UpperBound:      bound,
+				CumulativeCount: float64(it.cBuckets[idx]),
 			}
 		}
+	}
+
+	if it.schema <= 0 && len(it.classicValues) > 0 {
+		schema = histogram.CustomBucketsSchema
+		if count == 0 && len(it.cBuckets) > 0 {
+			count = uint64(it.cBuckets[len(it.cBuckets)-1])
+		}
+
+		for _, v := range it.classicValues {
+			if !math.IsInf(v, 1) {
+				customValues = append(customValues, v)
+			}
+		}
+		positiveBuckets = make([]int64, len(it.classicValues))
+		var last int64
+		for idx, cBucket := range it.cBuckets {
+			positiveBuckets[idx] = cBucket - last
+			last = cBucket
+		}
+		positiveSpans = []histogram.Span{{Offset: 0, Length: uint32(len(it.classicValues))}}
+	}
+
+	if h == nil {
+		it.atHistogramCalled = true
+
+		pSpans, pBuckets, cValues := it.pSpans, it.pBuckets, it.customValues
+		if it.schema <= 0 && len(it.classicValues) > 0 {
+			pSpans, pBuckets, cValues = positiveSpans, positiveBuckets, customValues
+		}
+
 		h = &histogram.Histogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
-			Count:            it.cnt,
+			Count:            count,
 			ZeroCount:        it.zCnt,
 			Sum:              it.sum,
 			ZeroThreshold:    it.zThreshold,
-			Schema:           it.schema,
-			PositiveSpans:    it.pSpans,
+			Schema:           schema,
+			PositiveSpans:    pSpans,
 			NegativeSpans:    it.nSpans,
-			PositiveBuckets:  it.pBuckets,
+			PositiveBuckets:  pBuckets,
 			NegativeBuckets:  it.nBuckets,
-			CustomValues:     it.customValues,
+			CustomValues:     cValues,
 			ClassicBuckets:   classicBuckets,
 		}
 		if h.Schema > histogram.ExponentialSchemaMax && h.Schema <= histogram.ExponentialSchemaMaxReserved {
-			// This is a very slow path, but it should only happen if the
-			// chunk is from a newer Prometheus version that supports higher
-			// resolution.
 			h = h.Copy()
 			if err := h.ReduceResolution(histogram.ExponentialSchemaMax); err != nil {
-				// With the checks above, this can only happen
-				// with invalid data in a chunk. As this is a
-				// rare edge case of a rare edge case, we'd
-				// rather not create all the plumbing to handle
-				// this error gracefully.
 				panic(err)
 			}
 		}
@@ -1004,26 +1036,35 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	}
 
 	h.CounterResetHint = counterResetHint(it.counterResetHeader, it.numRead)
-	h.Schema = it.schema
+	h.Schema = schema
 	h.ZeroThreshold = it.zThreshold
 	h.ZeroCount = it.zCnt
-	h.Count = it.cnt
+	h.Count = count
 	h.Sum = it.sum
-
-	h.PositiveSpans = resize(h.PositiveSpans, len(it.pSpans))
-	copy(h.PositiveSpans, it.pSpans)
 
 	h.NegativeSpans = resize(h.NegativeSpans, len(it.nSpans))
 	copy(h.NegativeSpans, it.nSpans)
 
-	h.PositiveBuckets = resize(h.PositiveBuckets, len(it.pBuckets))
-	copy(h.PositiveBuckets, it.pBuckets)
-
 	h.NegativeBuckets = resize(h.NegativeBuckets, len(it.nBuckets))
 	copy(h.NegativeBuckets, it.nBuckets)
 
-	// Custom values are interned. The single copy is here in the iterator.
-	h.CustomValues = it.customValues
+	if it.schema <= 0 && len(it.classicValues) > 0 {
+		h.PositiveSpans = resize(h.PositiveSpans, len(positiveSpans))
+		copy(h.PositiveSpans, positiveSpans)
+
+		h.PositiveBuckets = resize(h.PositiveBuckets, len(positiveBuckets))
+		copy(h.PositiveBuckets, positiveBuckets)
+
+		h.CustomValues = customValues
+	} else {
+		h.PositiveSpans = resize(h.PositiveSpans, len(it.pSpans))
+		copy(h.PositiveSpans, it.pSpans)
+
+		h.PositiveBuckets = resize(h.PositiveBuckets, len(it.pBuckets))
+		copy(h.PositiveBuckets, it.pBuckets)
+
+		h.CustomValues = it.customValues
+	}
 
 	h.ClassicBuckets = resize(h.ClassicBuckets, len(it.classicValues))
 	for idx, bound := range it.classicValues {
@@ -1034,14 +1075,7 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	}
 
 	if h.Schema > histogram.ExponentialSchemaMax && h.Schema <= histogram.ExponentialSchemaMaxReserved {
-		// This is a very slow path, but it should only happen if the
-		// chunk is from a newer Prometheus version that supports higher
-		// resolution.
 		if err := h.ReduceResolution(histogram.ExponentialSchemaMax); err != nil {
-			// With the checks above, this can only happen with
-			// invalid data in a chunk. As this is a rare edge case
-			// of a rare edge case, we'd rather not create all the
-			// plumbing to handle this error gracefully.
 			panic(err)
 		}
 	}
@@ -1053,30 +1087,65 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 	if value.IsStaleNaN(it.sum) {
 		return it.t, &histogram.FloatHistogram{Sum: it.sum}
 	}
-	if fh == nil {
-		it.atFloatHistogramCalled = true
-		var classicBuckets []histogram.ClassicBucket
-		if len(it.classicValues) > 0 {
-			classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
-			for idx, bound := range it.classicValues {
-				classicBuckets[idx] = histogram.ClassicBucket{
-					UpperBound:      bound,
-					CumulativeCount: float64(it.cBuckets[idx]),
-				}
+
+	var classicBuckets []histogram.ClassicBucket
+	var customValues []float64
+	var positiveSpans []histogram.Span
+	var positiveBuckets []float64
+
+	schema := it.schema
+	count := float64(it.cnt)
+
+	if len(it.classicValues) > 0 {
+		classicBuckets = make([]histogram.ClassicBucket, len(it.classicValues))
+		for idx, bound := range it.classicValues {
+			classicBuckets[idx] = histogram.ClassicBucket{
+				UpperBound:      bound,
+				CumulativeCount: float64(it.cBuckets[idx]),
 			}
 		}
+	}
+
+	if it.schema <= 0 && len(it.classicValues) > 0 {
+		schema = histogram.CustomBucketsSchema
+		if count == 0 && len(it.cBuckets) > 0 {
+			count = float64(it.cBuckets[len(it.cBuckets)-1])
+		}
+
+		for _, v := range it.classicValues {
+			if !math.IsInf(v, 1) {
+				customValues = append(customValues, v)
+			}
+		}
+		positiveBuckets = make([]float64, len(it.classicValues))
+		var last float64
+		for idx, cBucket := range it.cBuckets {
+			positiveBuckets[idx] = float64(cBucket) - last
+			last = float64(cBucket)
+		}
+		positiveSpans = []histogram.Span{{Offset: 0, Length: uint32(len(it.classicValues))}}
+	}
+
+	if fh == nil {
+		it.atFloatHistogramCalled = true
+
+		pSpans, pBuckets, cValues := it.pSpans, it.pFloatBuckets, it.customValues
+		if it.schema <= 0 && len(it.classicValues) > 0 {
+			pSpans, pBuckets, cValues = positiveSpans, positiveBuckets, customValues
+		}
+
 		fh = &histogram.FloatHistogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
-			Count:            float64(it.cnt),
+			Count:            count,
 			ZeroCount:        float64(it.zCnt),
 			Sum:              it.sum,
 			ZeroThreshold:    it.zThreshold,
-			Schema:           it.schema,
-			PositiveSpans:    it.pSpans,
+			Schema:           schema,
+			PositiveSpans:    pSpans,
 			NegativeSpans:    it.nSpans,
-			PositiveBuckets:  it.pFloatBuckets,
+			PositiveBuckets:  pBuckets,
 			NegativeBuckets:  it.nFloatBuckets,
-			CustomValues:     it.customValues,
+			CustomValues:     cValues,
 			ClassicBuckets:   classicBuckets,
 		}
 		if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
@@ -1097,53 +1166,41 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 	}
 
 	fh.CounterResetHint = counterResetHint(it.counterResetHeader, it.numRead)
-	fh.Schema = it.schema
+	fh.Schema = schema
 	fh.ZeroThreshold = it.zThreshold
 	fh.ZeroCount = float64(it.zCnt)
-	fh.Count = float64(it.cnt)
+	fh.Count = count
 	fh.Sum = it.sum
-
-	fh.PositiveSpans = resize(fh.PositiveSpans, len(it.pSpans))
-	copy(fh.PositiveSpans, it.pSpans)
 
 	fh.NegativeSpans = resize(fh.NegativeSpans, len(it.nSpans))
 	copy(fh.NegativeSpans, it.nSpans)
 
-	fh.PositiveBuckets = resize(fh.PositiveBuckets, len(it.pBuckets))
-	var currentPositive float64
-	for i, b := range it.pBuckets {
-		currentPositive += float64(b)
-		fh.PositiveBuckets[i] = currentPositive
-	}
+	fh.NegativeBuckets = resize(fh.NegativeBuckets, len(it.nFloatBuckets))
+	copy(fh.NegativeBuckets, it.nFloatBuckets)
 
-	fh.NegativeBuckets = resize(fh.NegativeBuckets, len(it.nBuckets))
-	var currentNegative float64
-	for i, b := range it.nBuckets {
-		currentNegative += float64(b)
-		fh.NegativeBuckets[i] = currentNegative
-	}
+	if it.schema <= 0 && len(it.classicValues) > 0 {
+		fh.PositiveSpans = resize(fh.PositiveSpans, len(positiveSpans))
+		copy(fh.PositiveSpans, positiveSpans)
 
-	// Custom values are interned. The single copy is here in the iterator.
-	fh.CustomValues = it.customValues
+		fh.PositiveBuckets = resize(fh.PositiveBuckets, len(positiveBuckets))
+		copy(fh.PositiveBuckets, positiveBuckets)
+
+		fh.CustomValues = customValues
+	} else {
+		fh.PositiveSpans = resize(fh.PositiveSpans, len(it.pSpans))
+		copy(fh.PositiveSpans, it.pSpans)
+
+		fh.PositiveBuckets = resize(fh.PositiveBuckets, len(it.pFloatBuckets))
+		copy(fh.PositiveBuckets, it.pFloatBuckets)
+
+		fh.CustomValues = it.customValues
+	}
 
 	fh.ClassicBuckets = resize(fh.ClassicBuckets, len(it.classicValues))
 	for idx, bound := range it.classicValues {
 		fh.ClassicBuckets[idx] = histogram.ClassicBucket{
 			UpperBound:      bound,
 			CumulativeCount: float64(it.cBuckets[idx]),
-		}
-	}
-
-	if fh.Schema > histogram.ExponentialSchemaMax && fh.Schema <= histogram.ExponentialSchemaMaxReserved {
-		// This is a very slow path, but it should only happen if the
-		// chunk is from a newer Prometheus version that supports higher
-		// resolution.
-		if err := fh.ReduceResolution(histogram.ExponentialSchemaMax); err != nil {
-			// With the checks above, this can only happen with
-			// invalid data in a chunk. As this is a rare edge case
-			// of a rare edge case, we'd rather not create all the
-			// plumbing to handle this error gracefully.
-			panic(err)
 		}
 	}
 
@@ -1170,31 +1227,32 @@ func (it *histogramIterator) Reset(b []byte) {
 	it.numRead = 0
 
 	it.counterResetHeader = CounterResetHeader(b[histogramFlagPos] & CounterResetHeaderMask)
+	it.hasClassic = (b[histogramFlagPos] & HasClassicBucketsMask) != 0
 
 	it.t, it.cnt, it.zCnt = 0, 0, 0
 	it.tDelta, it.cntDelta, it.zCntDelta = 0, 0, 0
 
 	// Recycle slices that have not been returned yet. Otherwise, start from
 	// scratch.
-	if it.atHistogramCalled {
+	if it.atHistogramCalled || it.atFloatHistogramCalled {
 		it.atHistogramCalled = false
+		it.atFloatHistogramCalled = false
 		it.pBuckets, it.nBuckets = nil, nil
 		it.pSpans, it.nSpans = nil, nil
+		it.pFloatBuckets, it.nFloatBuckets = nil, nil
+		it.cBuckets = nil
+		it.cBucketsDelta = nil
 	} else {
 		it.pBuckets = it.pBuckets[:0]
 		it.nBuckets = it.nBuckets[:0]
-	}
-	if it.atFloatHistogramCalled {
-		it.atFloatHistogramCalled = false
-		it.pFloatBuckets, it.nFloatBuckets = nil, nil
-	} else {
 		it.pFloatBuckets = it.pFloatBuckets[:0]
 		it.nFloatBuckets = it.nFloatBuckets[:0]
+		it.cBuckets = it.cBuckets[:0]
+		it.cBucketsDelta = it.cBucketsDelta[:0]
 	}
 
 	it.pBucketsDelta = it.pBucketsDelta[:0]
 	it.nBucketsDelta = it.nBucketsDelta[:0]
-	it.cBuckets = it.cBuckets[:0]
 	it.cBucketsDelta = it.cBucketsDelta[:0]
 
 	it.sum = 0
@@ -1213,7 +1271,7 @@ func (it *histogramIterator) Next() ValueType {
 		// The first read is responsible for reading the chunk layout
 		// and for initializing fields that depend on it. We give
 		// counter reset info at chunk level, hence we discard it here.
-		schema, zeroThreshold, posSpans, negSpans, customValues, classicValues, err := readHistogramChunkLayout(&it.br)
+		schema, zeroThreshold, posSpans, negSpans, customValues, classicValues, err := readHistogramChunkLayout(&it.br, it.hasClassic)
 		if err != nil {
 			it.err = fmt.Errorf("readHistogramChunkLayout: %w", err)
 			return ValNone

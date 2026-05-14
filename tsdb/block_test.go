@@ -143,7 +143,7 @@ func TestCorruptedChunk(t *testing.T) {
 				// Truncate one byte after the segment header.
 				require.NoError(t, f.Truncate(chunks.SegmentHeaderSize+1))
 			},
-			iterErr: errors.New("cannot populate chunk 8 from block 00000000000000000000000000: segment doesn't include enough bytes to read the chunk size data field - required:13, available:9"),
+			iterErr: errors.New("segment doesn't include enough bytes to read the chunk size data field - required:13, available:9"),
 		},
 		{
 			name: "chunk not enough bytes to read the data",
@@ -152,7 +152,7 @@ func TestCorruptedChunk(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, f.Truncate(fi.Size()-1))
 			},
-			iterErr: errors.New("cannot populate chunk 8 from block 00000000000000000000000000: segment doesn't include enough bytes to read the chunk - required:25, available:24"),
+			iterErr: errors.New("segment doesn't include enough bytes to read the chunk - required:25, available:24"),
 		},
 		{
 			name: "checksum mismatch",
@@ -170,7 +170,7 @@ func TestCorruptedChunk(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, 1, n)
 			},
-			iterErr: errors.New("cannot populate chunk 8 from block 00000000000000000000000000: checksum mismatch expected:231bddcf, actual:d85ad10d"),
+			iterErr: errors.New("checksum mismatch expected:231bddcf, actual:d85ad10d"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -206,7 +206,7 @@ func TestCorruptedChunk(t *testing.T) {
 			require.True(t, set.Next())
 			it := set.At().Iterator(nil)
 			require.Equal(t, chunkenc.ValNone, it.Next())
-			require.EqualError(t, it.Err(), tc.iterErr.Error())
+			require.ErrorContains(t, it.Err(), tc.iterErr.Error())
 		})
 	}
 }

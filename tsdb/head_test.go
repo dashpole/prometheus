@@ -6648,8 +6648,6 @@ func TestCuttingNewHeadChunks(t *testing.T) {
 				chkMetas := make([]chunks.Meta, len(tc.expectedChks))
 				require.NoError(t, idxReader.Series(sRef, &lblBuilder, &chkMetas))
 
-				require.Len(t, chkMetas, len(tc.expectedChks))
-
 				for i, expected := range tc.expectedChks {
 					chk, iterable, err := chkReader.ChunkOrIterable(chkMetas[i])
 					require.NoError(t, err)

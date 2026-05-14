@@ -1956,6 +1956,10 @@ func funcResets(_ []Vector, matrixVal Matrix, args parser.Expressions, enh *Eval
 	if len(floats) == 0 && len(histograms) == 0 {
 		return enh.Out, nil
 	}
+	fmt.Printf("DEBUG: resets() called! floats len: %d, histograms len: %d\n", len(floats), len(histograms))
+	for i, h := range histograms {
+		fmt.Printf("  H[%d] T=%d: count=%g, sum=%g, testExpr=%s\n", i, h.T, h.H.Count, h.H.Sum, h.H.TestExpression())
+	}
 
 	var (
 		prevSample, curSample  Sample

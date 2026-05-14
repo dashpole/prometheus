@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/prometheus/prometheus/util/kahansum"
@@ -145,6 +146,13 @@ func (h *FloatHistogram) CopyTo(to *FloatHistogram) {
 
 	to.PositiveBuckets = resize(to.PositiveBuckets, len(h.PositiveBuckets))
 	copy(to.PositiveBuckets, h.PositiveBuckets)
+
+	if len(h.ClassicBuckets) > 0 {
+		to.ClassicBuckets = resize(to.ClassicBuckets, len(h.ClassicBuckets))
+		copy(to.ClassicBuckets, h.ClassicBuckets)
+	} else {
+		to.ClassicBuckets = nil
+	}
 }
 
 // CopyToSchema works like Copy, but the returned deep copy has the provided
@@ -268,8 +276,21 @@ func (h *FloatHistogram) TestExpression() string {
 		}
 		return res
 	}
-	res = addBuckets("positive", "buckets", "offset", m.PositiveBuckets, m.PositiveSpans)
-	res = addBuckets("negative", "n_buckets", "n_offset", m.NegativeBuckets, m.NegativeSpans)
+	if m.UsesCustomBuckets() && len(m.ClassicBuckets) > 0 {
+		var bucketStr []string
+		var last float64
+		for _, cb := range m.ClassicBuckets {
+			delta := cb.CumulativeCount - last
+			bucketStr = append(bucketStr, fmt.Sprintf("%g", delta))
+			last = cb.CumulativeCount
+		}
+		if len(bucketStr) > 0 {
+			res = append(res, fmt.Sprintf("buckets:[%s]", strings.Join(bucketStr, " ")))
+		}
+	} else {
+		res = addBuckets("positive", "buckets", "offset", m.PositiveBuckets, m.PositiveSpans)
+		res = addBuckets("negative", "n_buckets", "n_offset", m.NegativeBuckets, m.NegativeSpans)
+	}
 	return "{{" + strings.Join(res, " ") + "}}"
 }
 
@@ -304,6 +325,9 @@ func (h *FloatHistogram) Mul(factor float64) *FloatHistogram {
 	for i := range h.NegativeBuckets {
 		h.NegativeBuckets[i] *= factor
 	}
+	for i := range h.ClassicBuckets {
+		h.ClassicBuckets[i].CumulativeCount *= factor
+	}
 	if factor < 0 {
 		h.CounterResetHint = GaugeType
 	}
@@ -323,6 +347,7 @@ func (h *FloatHistogram) Div(scalar float64) *FloatHistogram {
 		h.NegativeBuckets = nil
 		h.PositiveSpans = nil
 		h.NegativeSpans = nil
+		h.ClassicBuckets = nil
 		return h
 	}
 	for i := range h.PositiveBuckets {
@@ -330,6 +355,9 @@ func (h *FloatHistogram) Div(scalar float64) *FloatHistogram {
 	}
 	for i := range h.NegativeBuckets {
 		h.NegativeBuckets[i] /= scalar
+	}
+	for i := range h.ClassicBuckets {
+		h.ClassicBuckets[i].CumulativeCount /= scalar
 	}
 	if scalar < 0 {
 		h.CounterResetHint = GaugeType
@@ -389,6 +417,33 @@ func (h *FloatHistogram) Add(other *FloatHistogram) (res *FloatHistogram, counte
 				otherPositiveSpans, otherPositiveBuckets, other.CustomValues,
 				nil, intersectedBounds)
 			h.CustomValues = intersectedBounds
+		}
+		if len(h.ClassicBuckets) > 0 && len(other.ClassicBuckets) > 0 {
+			if len(h.ClassicBuckets) == len(other.ClassicBuckets) {
+				for i := range h.ClassicBuckets {
+					h.ClassicBuckets[i].CumulativeCount += other.ClassicBuckets[i].CumulativeCount
+				}
+			} else {
+				merged := map[float64]float64{}
+				for _, cb := range h.ClassicBuckets {
+					merged[cb.UpperBound] += cb.CumulativeCount
+				}
+				for _, cb := range other.ClassicBuckets {
+					merged[cb.UpperBound] += cb.CumulativeCount
+				}
+				var bounds []float64
+				for b := range merged {
+					bounds = append(bounds, b)
+				}
+				sort.Float64s(bounds)
+				h.ClassicBuckets = make([]ClassicBucket, len(bounds))
+				for i, b := range bounds {
+					h.ClassicBuckets[i] = ClassicBucket{
+						UpperBound:      b,
+						CumulativeCount: merged[b],
+					}
+				}
+			}
 		}
 		return h, counterResetCollision, nhcbBoundsReconciled, nil
 	}
@@ -469,6 +524,45 @@ func (h *FloatHistogram) KahanAdd(other, c *FloatHistogram) (updatedC *FloatHist
 			c.CustomValues = intersectedBounds
 		}
 		c.PositiveSpans = h.PositiveSpans
+		if len(h.ClassicBuckets) > 0 && len(other.ClassicBuckets) > 0 {
+			if c.ClassicBuckets == nil {
+				c.ClassicBuckets = make([]ClassicBucket, len(h.ClassicBuckets))
+				copy(c.ClassicBuckets, h.ClassicBuckets)
+				for i := range c.ClassicBuckets {
+					c.ClassicBuckets[i].CumulativeCount = 0
+				}
+			}
+			if len(h.ClassicBuckets) == len(other.ClassicBuckets) {
+				for i := range h.ClassicBuckets {
+					h.ClassicBuckets[i].CumulativeCount, c.ClassicBuckets[i].CumulativeCount = kahansum.Inc(
+						other.ClassicBuckets[i].CumulativeCount,
+						h.ClassicBuckets[i].CumulativeCount,
+						c.ClassicBuckets[i].CumulativeCount,
+					)
+				}
+			} else {
+				merged := map[float64]float64{}
+				for _, cb := range h.ClassicBuckets {
+					merged[cb.UpperBound] += cb.CumulativeCount
+				}
+				for _, cb := range other.ClassicBuckets {
+					merged[cb.UpperBound] += cb.CumulativeCount
+				}
+				var bounds []float64
+				for b := range merged {
+					bounds = append(bounds, b)
+				}
+				sort.Float64s(bounds)
+				h.ClassicBuckets = make([]ClassicBucket, len(bounds))
+				for i, b := range bounds {
+					h.ClassicBuckets[i] = ClassicBucket{
+						UpperBound:      b,
+						CumulativeCount: merged[b],
+					}
+				}
+				c.ClassicBuckets = nil
+			}
+		}
 		return c, counterResetCollision, nhcbBoundsReconciled, nil
 	}
 
@@ -710,6 +804,18 @@ func (h *FloatHistogram) Compact(maxEmptyBuckets int) *FloatHistogram {
 	h.NegativeBuckets, _, h.NegativeSpans = compactBuckets(
 		h.NegativeBuckets, nil, h.NegativeSpans, maxEmptyBuckets, false,
 	)
+	if len(h.ClassicBuckets) > 0 {
+		allZero := true
+		for _, cb := range h.ClassicBuckets {
+			if cb.CumulativeCount != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			h.ClassicBuckets = nil
+		}
+	}
 	return h
 }
 

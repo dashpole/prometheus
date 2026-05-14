@@ -177,6 +177,13 @@ func (h *Histogram) CopyTo(to *Histogram) {
 
 	to.PositiveBuckets = resize(to.PositiveBuckets, len(h.PositiveBuckets))
 	copy(to.PositiveBuckets, h.PositiveBuckets)
+
+	if len(h.ClassicBuckets) > 0 {
+		to.ClassicBuckets = resize(to.ClassicBuckets, len(h.ClassicBuckets))
+		copy(to.ClassicBuckets, h.ClassicBuckets)
+	} else {
+		to.ClassicBuckets = nil
+	}
 }
 
 // String returns a string representation of the Histogram.

@@ -179,11 +179,12 @@ func New(b []byte, contentType string, st *labels.SymbolTable, opts ParserOption
 			o.enableTypeAndUnitLabels = opts.EnableTypeAndUnitLabels
 		})
 	case "application/vnd.google.protobuf":
+		enableConversion := !opts.IgnoreNativeHistograms || opts.ConvertClassicHistogramsToNHCB
 		return NewProtobufParser(
 			b,
 			opts.IgnoreNativeHistograms,
 			opts.KeepClassicOnClassicAndNativeHistograms,
-			true,
+			enableConversion,
 			opts.EnableTypeAndUnitLabels,
 			st,
 		), err
@@ -193,7 +194,8 @@ func New(b []byte, contentType string, st *labels.SymbolTable, opts ParserOption
 		return nil, err
 	}
 
-	if baseParser != nil {
+	enableConversion := !opts.IgnoreNativeHistograms || opts.ConvertClassicHistogramsToNHCB
+	if baseParser != nil && enableConversion {
 		baseParser = NewClassicToNativeParser(baseParser, st, opts.KeepClassicOnClassicAndNativeHistograms)
 	}
 

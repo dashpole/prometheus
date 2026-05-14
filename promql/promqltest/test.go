@@ -1043,9 +1043,13 @@ func (cmd *loadCmd) appendCustomHistogram(a storage.AppenderV2) error {
 				return classicBuckets[i].UpperBound < classicBuckets[j].UpperBound
 			})
 
+			count := point.count
+			if !point.hasCount && len(classicBuckets) > 0 {
+				count = classicBuckets[len(classicBuckets)-1].CumulativeCount
+			}
 			fh := &histogram.FloatHistogram{
 				Schema:         0,
-				Count:          point.count,
+				Count:          count,
 				Sum:            point.sum,
 				ClassicBuckets: classicBuckets,
 			}
@@ -1449,6 +1453,17 @@ func compareNativeHistogram(exp, cur *histogram.FloatHistogram, counterResetHint
 	if exp.UsesCustomBuckets() {
 		if !histogram.CustomBucketBoundsMatch(exp.CustomValues, cur.CustomValues) {
 			return false
+		}
+		if len(exp.ClassicBuckets) > 0 && len(cur.ClassicBuckets) > 0 {
+			if len(exp.ClassicBuckets) != len(cur.ClassicBuckets) {
+				return false
+			}
+			for i := range exp.ClassicBuckets {
+				if !almost.Equal(exp.ClassicBuckets[i].UpperBound, cur.ClassicBuckets[i].UpperBound, defaultEpsilon) ||
+					!almost.Equal(exp.ClassicBuckets[i].CumulativeCount, cur.ClassicBuckets[i].CumulativeCount, defaultEpsilon) {
+					return false
+				}
+			}
 		}
 	}
 

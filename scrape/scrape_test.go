@@ -5497,12 +5497,8 @@ metric: <
 				}
 			} else if metricsText.hasClassic {
 				expectedClassicHistCount = 1
-				if tc.convertClassicHistToNHCB {
-					expectedNativeHistCount = 1
-					expectCustomBuckets = true
-				} else {
-					expectedNativeHistCount = 0
-				}
+				expectedNativeHistCount = 1
+				expectCustomBuckets = true
 			}
 
 			t.Run(fmt.Sprintf("%s with %s", name, metricsTextName), func(t *testing.T) {
@@ -5545,7 +5541,7 @@ metric: <
 
 				var expectedSchema int32
 				if expectCustomBuckets {
-					expectedSchema = 0 // Our new combined format uses schema 0!
+					expectedSchema = histogram.CustomBucketsSchema
 				} else {
 					expectedSchema = 3
 				}

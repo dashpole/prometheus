@@ -151,6 +151,22 @@ func (h *headIndexReader) SortedPostings(p index.Postings) index.Postings {
 		return index.ErrPostings(fmt.Errorf("expand postings: %w", err))
 	}
 
+	seenReal := map[string]bool{}
+	for _, e := range entries {
+		if uint64(e.ref)&VirtualSeriesMask == 0 {
+			seenReal[e.lbls.String()] = true
+		}
+	}
+
+	filtered := make([]entry, 0, len(entries))
+	for _, e := range entries {
+		isVirtual := uint64(e.ref)&VirtualSeriesMask != 0
+		if !isVirtual || !seenReal[e.lbls.String()] {
+			filtered = append(filtered, e)
+		}
+	}
+	entries = filtered
+
 	slices.SortFunc(entries, func(a, b entry) int {
 		return labels.Compare(a.lbls, b.lbls)
 	})
