@@ -345,6 +345,7 @@ func (sm *scrapeMetrics) Unregister() {
 	sm.reg.Unregister(sm.targetScrapePoolExceededLabelLimits)
 	sm.reg.Unregister(sm.targetScrapeNativeHistogramBucketLimit)
 	sm.reg.Unregister(sm.targetScrapeDuration)
+	sm.reg.Unregister(sm.targetScrapesSkipped)
 }
 
 type TargetsGatherer interface {

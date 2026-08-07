@@ -101,18 +101,20 @@ type Manager struct {
 	mu     sync.RWMutex
 	config *config.MemoryLimiterConfig
 
-	state              atomic.Int32
-	lastInUse          atomic.Uint64
-	lastGCLimiterCycle uint64
-	lastCheckTime      time.Time
+	state                atomic.Int32
+	lastInUse            atomic.Uint64
+	lastGCLimiterCycle   uint64
+	gcLimiterInitialized bool
+	lastCheckTime        time.Time
 
 	metricsReader MetricsReader
 	now           func() time.Time
 
 	metrics *memoryLimiterMetrics
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	reloadCh chan struct{}
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
 }
 
 func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg prometheus.Registerer) (*Manager, error) {
@@ -126,6 +128,7 @@ func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg promet
 		metricsReader: defaultMetricsReader,
 		now:           time.Now,
 		metrics:       newMemoryLimiterMetrics(reg),
+		reloadCh:      make(chan struct{}, 1),
 	}
 
 	if cfg != nil {
@@ -148,6 +151,12 @@ func (m *Manager) ApplyConfig(cfg *config.MemoryLimiterConfig) error {
 	}
 
 	m.config = cfg
+
+	select {
+	case m.reloadCh <- struct{}{}:
+	default:
+	}
+
 	return nil
 }
 
@@ -203,6 +212,15 @@ func (m *Manager) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-m.reloadCh:
+			m.mu.RLock()
+			newInterval := 100 * time.Millisecond
+			if m.config != nil && m.config.CheckInterval > 0 {
+				newInterval = time.Duration(m.config.CheckInterval)
+			}
+			m.mu.RUnlock()
+			ticker.Reset(newInterval)
+			m.Evaluate()
 		case <-ticker.C:
 			m.Evaluate()
 		}
@@ -214,20 +232,22 @@ func (m *Manager) Evaluate() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.config == nil {
-		m.state.Store(int32(StateOK))
-		return
-	}
-
 	stats := m.metricsReader()
 	totalBytes := stats.TotalBytes
 	releasedBytes := stats.ReleasedBytes
 	gomemlimit := stats.GOMEMLIMIT
 	gcLimiterCycle := stats.GCLimiterCycle
 
-	if gomemlimit == 0 || gomemlimit == math.MaxInt64 {
-		// GOMEMLIMIT not configured or unlimited.
-		m.state.Store(int32(StateOK))
+	if m.config == nil || gomemlimit == 0 || gomemlimit == math.MaxInt64 {
+		oldState := LimiterState(m.state.Swap(int32(StateOK)))
+		if oldState != StateOK {
+			m.metrics.transitionsTotal.WithLabelValues(oldState.String(), StateOK.String()).Inc()
+		}
+		m.metrics.active.WithLabelValues("hard").Set(0)
+		m.metrics.active.WithLabelValues("soft").Set(0)
+		m.metrics.limitBytes.WithLabelValues("soft").Set(0)
+		m.metrics.limitBytes.WithLabelValues("hard").Set(0)
+		m.metrics.inUseBytes.Set(0)
 		return
 	}
 
@@ -255,8 +275,9 @@ func (m *Manager) Evaluate() {
 
 	pressureRatio := float64(inUse) / float64(gomemlimit)
 
-	gcLimiterActive := gcLimiterCycle > m.lastGCLimiterCycle && m.lastGCLimiterCycle != 0
+	gcLimiterActive := m.gcLimiterInitialized && gcLimiterCycle > m.lastGCLimiterCycle
 	m.lastGCLimiterCycle = gcLimiterCycle
+	m.gcLimiterInitialized = true
 
 	var newState LimiterState
 	if pressureRatio >= m.config.HardLimitRatio || gcLimiterActive {
