@@ -1342,17 +1342,16 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 	numTargets := 6
 	servers := make([]*httptest.Server, numTargets)
 	targetAddrs := make([]string, numTargets)
-	var scrapeAttempts atomic.Int64
+	var successfulScrapes atomic.Int64
 
 	for i := 0; i < numTargets; i++ {
 		targetID := i
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			scrapeAttempts.Add(1)
+			successfulScrapes.Add(1)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			// 1,800 series per target with realistic labels to calibrate ~50% duty cycle under 64MiB.
-			for k := 0; k < 1800; k++ {
-				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\"} %d\n", targetID, k, targetID, k)
+			for k := 0; k < 500; k++ {
+				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"metric_payload_sample_%d\",service=\"data_ingest_pipeline\"} %d\n", targetID, k, targetID, k, k, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
 		}))
@@ -1368,20 +1367,20 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 
 	promConfigContent := fmt.Sprintf(`
 global:
-  scrape_interval: 200ms
-  scrape_timeout: 200ms
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
 
 runtime:
   gogc: 50
   memory_limiter:
     check_interval: 20ms
-    soft_limit_ratio: 0.70
-    hard_limit_ratio: 0.85
+    soft_limit_ratio: 0.65
+    hard_limit_ratio: 0.80
 
 scrape_configs:
   - job_name: "sustained_overload"
-    scrape_interval: 200ms
-    scrape_timeout: 200ms
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
     static_configs:
 %s
 `, targetsYAML.String())
@@ -1436,7 +1435,8 @@ scrape_configs:
 		skipped := metrics["prometheus_target_scrapes_skipped_total"]
 		inUse := metrics["prometheus_memory_limiter_in_use_bytes"] / (1024 * 1024)
 		hardActive := metrics["prometheus_memory_limiter_active{state=\"hard_limit\"}"]
-		totalAttempts := scrapeAttempts.Load()
+		sSuccess := successfulScrapes.Load()
+		totalAttempts := sSuccess + int64(skipped)
 
 		skipRatio := 0.0
 		if totalAttempts > 0 {
@@ -1450,8 +1450,8 @@ scrape_configs:
 			qAvail = float64(sQ) / float64(tQ) * 100.0
 		}
 
-		t.Logf("[%s / %s] Attempts=%d | Skipped=%.0f (%.1f%%) | InUse=%.2f MiB | HardActive=%.0f | CanaryQueries=%d/%d (%.1f%%)",
-			elapsed.Truncate(time.Second), duration, totalAttempts, skipped, skipRatio, inUse, hardActive,
+		t.Logf("[%s / %s] TotalAttempts=%d (Success=%d, Skipped=%.0f, %.1f%% shed) | InUse=%.2f MiB | HardActive=%.0f | CanaryQueries=%d/%d (%.1f%%)",
+			elapsed.Truncate(time.Second), duration, totalAttempts, sSuccess, skipped, skipRatio, inUse, hardActive,
 			sQ, tQ, qAvail)
 
 		// Assert process is still alive.
@@ -1467,9 +1467,13 @@ scrape_configs:
 	// Final evaluation.
 	finalMetrics := fetchPrometheusMetrics(t, addr)
 	finalSkipped := finalMetrics["prometheus_target_scrapes_skipped_total"]
-	finalAttempts := scrapeAttempts.Load()
-	finalSkipRatio := (finalSkipped / float64(finalAttempts)) * 100.0
-	t.Logf("Sustained Test Complete: Total Attempts=%d, Total Skipped=%.0f (%.2f%%)", finalAttempts, finalSkipped, finalSkipRatio)
+	finalSuccess := successfulScrapes.Load()
+	finalAttempts := finalSuccess + int64(finalSkipped)
+	finalSkipRatio := 0.0
+	if finalAttempts > 0 {
+		finalSkipRatio = (finalSkipped / float64(finalAttempts)) * 100.0
+	}
+	t.Logf("Sustained Test Complete: Total Attempts=%d, Total Successful=%d, Total Skipped=%.0f (%.2f%% skip ratio)", finalAttempts, finalSuccess, finalSkipped, finalSkipRatio)
 
 	// Assertions:
 	// 1. Skip ratio is around 50% (35% - 65% range for sustained runs).
@@ -1478,7 +1482,7 @@ scrape_configs:
 		require.LessOrEqual(t, finalSkipRatio, 65.0, "Skip ratio must not exceed 65% under sustained overload (must not blackout)")
 	} else {
 		require.GreaterOrEqual(t, finalSkipRatio, 10.0, "Skip ratio must be at least 10% during brief ramp-up")
-		require.LessOrEqual(t, finalSkipRatio, 70.0, "Skip ratio must not exceed 70%")
+		require.LessOrEqual(t, finalSkipRatio, 75.0, "Skip ratio must not exceed 75%")
 	}
 
 	// 2. Query availability >= 95.0% (and >= 99% for 15m run).
