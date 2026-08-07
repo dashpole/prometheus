@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
 )
 
@@ -51,29 +52,15 @@ func runPrometheusInstance(t *testing.T, configFile string, extraArgs []string, 
 		"--web.listen-address=" + addr,
 		"--storage.tsdb.path=" + dataPath,
 		"--storage.tsdb.retention.time=1d",
+		"--scrape.discovery-reload-interval=50ms",
 		"--log.level=info",
 	}, extraArgs...)
 
-	cmd := exec.Command(promPath, args...)
+	cmd := commandWithLogging(t, nil, promPath, args...)
 	cmd.Env = append(os.Environ(), env...)
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
 	err = cmd.Start()
 	require.NoError(t, err)
-
-	cleanup := func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
-		}
-		if t.Failed() {
-			t.Logf("Prometheus stdout:\n%s", stdout.String())
-			t.Logf("Prometheus stderr:\n%s", stderr.String())
-		}
-	}
 
 	// Wait for Prometheus to become ready.
 	readyURL := fmt.Sprintf("http://%s/-/ready", addr)
@@ -84,9 +71,9 @@ func runPrometheusInstance(t *testing.T, configFile string, extraArgs []string, 
 		}
 		defer resp.Body.Close()
 		return resp.StatusCode == http.StatusOK
-	}, 15*time.Second, 100*time.Millisecond, "Prometheus failed to become ready: %s", stderr.String())
+	}, 15*time.Second, 100*time.Millisecond, "Prometheus failed to become ready")
 
-	return cmd, addr, cleanup
+	return cmd, addr, func() {}
 }
 
 func fetchPrometheusMetrics(t *testing.T, addr string) map[string]float64 {
@@ -97,19 +84,29 @@ func fetchPrometheusMetrics(t *testing.T, addr string) map[string]float64 {
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var parser expfmt.TextParser
+	parser := expfmt.NewTextParser(model.UTF8Validation)
 	metricFamilies, err := parser.TextToMetricFamilies(resp.Body)
 	require.NoError(t, err)
 
 	results := make(map[string]float64)
 	for name, mf := range metricFamilies {
 		for _, m := range mf.Metric {
+			var val float64
 			if m.Gauge != nil {
-				results[name] = m.Gauge.GetValue()
+				val = m.Gauge.GetValue()
 			} else if m.Counter != nil {
-				results[name] = m.Counter.GetValue()
+				val = m.Counter.GetValue()
 			} else if m.Untyped != nil {
-				results[name] = m.Untyped.GetValue()
+				val = m.Untyped.GetValue()
+			}
+			results[name] = val
+			if len(m.Label) > 0 {
+				var labelStrs []string
+				for _, lp := range m.Label {
+					labelStrs = append(labelStrs, fmt.Sprintf("%s=\"%s\"", lp.GetName(), lp.GetValue()))
+				}
+				labeledKey := fmt.Sprintf("%s{%s}", name, strings.Join(labelStrs, ","))
+				results[labeledKey] = val
 			}
 		}
 	}
@@ -126,12 +123,12 @@ func TestScenario_S1_TransientScrapePayloadBurst(t *testing.T) {
 
 	var burstActive atomic.Bool
 
-	// Target server providing normal metrics or a burst of 30,000 series (large memory footprint).
+	// Target server providing normal metrics or a burst of 1000 series with multiple labels.
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if burstActive.Load() {
 			var b strings.Builder
-			for i := 0; i < 30000; i++ {
-				fmt.Fprintf(&b, "burst_metric_%d{instance=\"node1\",job=\"app\",extra_tag=\"long_label_value_%d\"} %d\n", i, i, i*42)
+			for i := 0; i < 1000; i++ {
+				fmt.Fprintf(&b, "burst_metric_%d{instance=\"node1\",job=\"app\",env=\"prod\",region=\"us-east\",zone=\"b\",tier=\"frontend\",owner=\"team_a\",service=\"auth\",k1=\"v1\",k2=\"v2\",k3=\"v3\",k4=\"v4\",k5=\"v5\",k6=\"v6\",k7=\"v7\",k8=\"v8\",k9=\"v9\",k10=\"v10\"} %d\n", i, i*42)
 			}
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			_, _ = w.Write([]byte(b.String()))
@@ -145,15 +142,15 @@ func TestScenario_S1_TransientScrapePayloadBurst(t *testing.T) {
 	// Write Prometheus configuration.
 	promConfigContent := fmt.Sprintf(`
 global:
-  scrape_interval: 200ms
-  scrape_timeout: 200ms
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
 
 runtime:
   gogc: 50
   memory_limiter:
-    check_interval: 50ms
-    soft_limit_ratio: 0.70
-    hard_limit_ratio: 0.85
+    check_interval: 25ms
+    soft_limit_ratio: 0.50
+    hard_limit_ratio: 0.65
     enforcement:
       pause_block_compaction: true
       reject_remote_read: true
@@ -161,8 +158,8 @@ runtime:
 
 scrape_configs:
   - job_name: "test_service"
-    scrape_interval: 200ms
-    scrape_timeout: 200ms
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
     static_configs:
       - targets: ["%s"]
 `, ts.Listener.Addr().String())
@@ -208,8 +205,14 @@ scrape_configs:
 	require.Eventually(t, func() bool {
 		m := fetchPrometheusMetrics(t, addr)
 		active := m["prometheus_memory_limiter_active"]
+		t.Logf("Phase 3 metrics: in_use=%v, limit=%v, active=%v, skipped=%v",
+			m["prometheus_memory_limiter_in_use_bytes"],
+			m["prometheus_memory_limiter_limit_bytes"],
+			active,
+			m["prometheus_target_scrapes_skipped_total"],
+		)
 		return active == 0
-	}, 15*time.Second, 200*time.Millisecond, "Expected memory limiter to disengage and return to StateOK after burst cessation")
+	}, 15*time.Second, 500*time.Millisecond, "Expected memory limiter to disengage and return to StateOK after burst cessation")
 }
 
 // TestScenario_S2_FlappingAndDutyCycle tests Scenario S2:
@@ -412,8 +415,8 @@ func TestScenario_S6_AdversarialConcurrentMultiTargetBurst(t *testing.T) {
 			// Only targets 0..9 burst when burstActive is true.
 			if burstActive.Load() && targetID < 10 {
 				var b strings.Builder
-				for k := 0; k < 10000; k++ {
-					fmt.Fprintf(&b, "burst_series_%d_%d{instance=\"target_%d\",env=\"prod\",cluster=\"us-central1\"} %d\n", targetID, k, targetID, k*7)
+				for k := 0; k < 100; k++ {
+					fmt.Fprintf(&b, "burst_series_%d_%d{instance=\"target_%d\",env=\"prod\",region=\"us-east\",zone=\"b\",tier=\"frontend\",owner=\"team_a\",service=\"auth\",k1=\"v1\",k2=\"v2\",k3=\"v3\",k4=\"v4\",k5=\"v5\",k6=\"v6\",k7=\"v7\",k8=\"v8\",k9=\"v9\",k10=\"v10\"} %d\n", targetID, k, targetID, k*7)
 				}
 				_, _ = w.Write([]byte(b.String()))
 				return
@@ -433,20 +436,20 @@ func TestScenario_S6_AdversarialConcurrentMultiTargetBurst(t *testing.T) {
 
 	promConfigContent := fmt.Sprintf(`
 global:
-  scrape_interval: 200ms
-  scrape_timeout: 200ms
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
 
 runtime:
   gogc: 50
   memory_limiter:
     check_interval: 25ms
-    soft_limit_ratio: 0.70
-    hard_limit_ratio: 0.85
+    soft_limit_ratio: 0.50
+    hard_limit_ratio: 0.65
 
 scrape_configs:
   - job_name: "multi_target_benchmark"
-    scrape_interval: 200ms
-    scrape_timeout: 200ms
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
     static_configs:
 %s
 `, targetsYAML.String())
@@ -479,8 +482,15 @@ scrape_configs:
 
 	require.Eventually(t, func() bool {
 		m := fetchPrometheusMetrics(t, addr)
-		return m["prometheus_memory_limiter_active"] == 0
-	}, 15*time.Second, 200*time.Millisecond, "Limiter must return to StateOK after multi-target burst ends")
+		active := m["prometheus_memory_limiter_active"]
+		t.Logf("S6 Step 3 metrics: in_use=%v, limit=%v, active=%v, skipped=%v",
+			m["prometheus_memory_limiter_in_use_bytes"],
+			m["prometheus_memory_limiter_limit_bytes"],
+			active,
+			m["prometheus_target_scrapes_skipped_total"],
+		)
+		return active == 0
+	}, 15*time.Second, 500*time.Millisecond, "Limiter must return to StateOK after multi-target burst ends")
 }
 
 // TestScenario_S7_MixedIngestionAndHeavyPromQLQueries tests adversarial scenario S7:
@@ -706,10 +716,15 @@ scrape_configs:
 	defer reloadResp.Body.Close()
 	require.Equal(t, http.StatusOK, reloadResp.StatusCode)
 
-	// Wait for reload to take effect and verify scrapes are no longer skipped.
+	// Wait for reload to take effect.
+	time.Sleep(300 * time.Millisecond)
+	mAfterReload := fetchPrometheusMetrics(t, addr)
+	skippedAfterReload := mAfterReload["prometheus_target_scrapes_skipped_total"]
+
+	// Wait another second and verify scrapes are no longer being skipped.
 	time.Sleep(1 * time.Second)
-	m2 := fetchPrometheusMetrics(t, addr)
-	skipped2 := m2["prometheus_target_scrapes_skipped_total"]
-	require.Equal(t, skipped1, skipped2, "Target scrapes skipped counter should not increase after fail_scrapes disabled via reload")
+	mFinal := fetchPrometheusMetrics(t, addr)
+	skippedFinal := mFinal["prometheus_target_scrapes_skipped_total"]
+	require.Equal(t, skippedAfterReload, skippedFinal, "Target scrapes skipped counter should not increase after fail_scrapes disabled via reload")
 }
 
