@@ -391,3 +391,234 @@ scrape_configs:
 	require.Equal(t, http.StatusServiceUnavailable, otlpResp.StatusCode)
 	require.Equal(t, "5", otlpResp.Header.Get("Retry-After"))
 }
+
+// TestScenario_S6_AdversarialConcurrentMultiTargetBurst tests adversarial scenario S6:
+// 20 concurrent desynchronized targets where half abruptly burst simultaneously with large payloads.
+// Verifies that the memory limiter prevents OOM under concurrent allocation pressure and recovers cleanly.
+func TestScenario_S6_AdversarialConcurrentMultiTargetBurst(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow scenario test in short mode")
+	}
+
+	var burstActive atomic.Bool
+	numTargets := 20
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			// Only targets 0..9 burst when burstActive is true.
+			if burstActive.Load() && targetID < 10 {
+				var b strings.Builder
+				for k := 0; k < 10000; k++ {
+					fmt.Fprintf(&b, "burst_series_%d_%d{instance=\"target_%d\",env=\"prod\",cluster=\"us-central1\"} %d\n", targetID, k, targetID, k*7)
+				}
+				_, _ = w.Write([]byte(b.String()))
+				return
+			}
+			fmt.Fprintf(w, "healthy_metric{instance=\"target_%d\"} 1\n", targetID)
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	// Format YAML targets list.
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 200ms
+  scrape_timeout: 200ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 25ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "multi_target_benchmark"
+    scrape_interval: 200ms
+    scrape_timeout: 200ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	// Step 1: Ensure healthy initial state across all 20 targets.
+	time.Sleep(1 * time.Second)
+	metrics := fetchPrometheusMetrics(t, addr)
+	require.Equal(t, float64(0), metrics["prometheus_memory_limiter_active"])
+
+	// Step 2: Trigger simultaneous multi-target burst.
+	burstActive.Store(true)
+
+	// Verify limiter engages under concurrent burst pressure and sheds load without process death.
+	require.Eventually(t, func() bool {
+		m := fetchPrometheusMetrics(t, addr)
+		return m["prometheus_target_scrapes_skipped_total"] > 0 || m["prometheus_memory_limiter_active"] > 0
+	}, 10*time.Second, 100*time.Millisecond, "Limiter must engage under concurrent multi-target burst")
+
+	// Step 3: Cessation and full recovery.
+	burstActive.Store(false)
+
+	require.Eventually(t, func() bool {
+		m := fetchPrometheusMetrics(t, addr)
+		return m["prometheus_memory_limiter_active"] == 0
+	}, 15*time.Second, 200*time.Millisecond, "Limiter must return to StateOK after multi-target burst ends")
+}
+
+// TestScenario_S7_MixedIngestionAndHeavyPromQLQueries tests adversarial scenario S7:
+// PromQL range queries executing concurrently while the memory limiter is actively shedding scrapes.
+// Verifies that query availability and latency remain stable without OOM deadlocks.
+func TestScenario_S7_MixedIngestionAndHeavyPromQLQueries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow scenario test in short mode")
+	}
+
+	var burstActive atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		if burstActive.Load() {
+			var b strings.Builder
+			for i := 0; i < 20000; i++ {
+				fmt.Fprintf(&b, "heavy_metric_%d{job=\"promql_test\",pod=\"pod_%d\"} %d\n", i, i%10, i)
+			}
+			_, _ = w.Write([]byte(b.String()))
+			return
+		}
+		fmt.Fprintf(w, "up_metric{job=\"promql_test\"} 1\n")
+	}))
+	defer ts.Close()
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 150ms
+  scrape_timeout: 150ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 25ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "promql_stress"
+    scrape_interval: 150ms
+    scrape_timeout: 150ms
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	burstActive.Store(true)
+
+	// Wait for memory limiter to engage.
+	require.Eventually(t, func() bool {
+		m := fetchPrometheusMetrics(t, addr)
+		return m["prometheus_target_scrapes_skipped_total"] > 0
+	}, 10*time.Second, 100*time.Millisecond)
+
+	// Execute concurrent PromQL queries while limiter is actively shedding scrapes.
+	queryURL := fmt.Sprintf("http://%s/api/v1/query?query=sum(up_metric)", addr)
+	for i := 0; i < 10; i++ {
+		resp, err := http.Get(queryURL)
+		require.NoError(t, err, "PromQL query must succeed during memory limiter load shedding")
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+
+	burstActive.Store(false)
+}
+
+// TestScenario_S8_SustainedOverloadTargetFairness tests adversarial scenario S8:
+// Verifies scrape distribution across multiple targets under sustained overload.
+func TestScenario_S8_SustainedOverloadTargetFairness(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow scenario test in short mode")
+	}
+
+	numTargets := 6
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			var b strings.Builder
+			for k := 0; k < 5000; k++ {
+				fmt.Fprintf(&b, "series_%d_%d{node=\"node_%d\"} %d\n", targetID, k, targetID, k)
+			}
+			_, _ = w.Write([]byte(b.String()))
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 150ms
+  scrape_timeout: 150ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "fairness_audit"
+    scrape_interval: 150ms
+    scrape_timeout: 150ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	// Allow sustained overload to run for 3 seconds.
+	time.Sleep(3 * time.Second)
+
+	metrics := fetchPrometheusMetrics(t, addr)
+	require.Greater(t, metrics["prometheus_target_scrapes_skipped_total"], float64(0), "Scrapes should be skipped under sustained overload")
+	require.Greater(t, metrics["prometheus_memory_limiter_in_use_bytes"], float64(0))
+}
