@@ -36,6 +36,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/features"
 	"github.com/prometheus/prometheus/util/logging"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/osutil"
 	"github.com/prometheus/prometheus/util/pool"
 )
@@ -175,8 +176,10 @@ type Options struct {
 	// initialized immediately upon startup. It also prevents capturing
 	// intermediate state (such as applications crashing shortly after booting),
 	// and ensures backend rate limits don't drop valuable shutdown scrapes
-	// because of an early startup scrape.
 	InitialScrapeOffset time.Duration
+
+	// Optional memory limiter to abort scrapes under memory pressure.
+	MemoryLimiter memorylimiter.MemoryLimiter
 
 	// private option for testability.
 	skipJitterOffsetting bool

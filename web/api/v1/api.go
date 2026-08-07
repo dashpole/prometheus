@@ -59,6 +59,7 @@ import (
 	"github.com/prometheus/prometheus/util/annotations"
 	"github.com/prometheus/prometheus/util/features"
 	"github.com/prometheus/prometheus/util/httputil"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/notifications"
 	"github.com/prometheus/prometheus/util/stats"
 )
@@ -271,6 +272,13 @@ type API struct {
 	openAPIBuilder  *OpenAPIBuilder
 
 	parser parser.Parser
+
+	memoryLimiter memorylimiter.MemoryLimiter
+}
+
+// SetMemoryLimiter sets the memory limiter for API endpoints.
+func (api *API) SetMemoryLimiter(ml memorylimiter.MemoryLimiter) {
+	api.memoryLimiter = ml
 }
 
 // NewAPI returns an initialized API type.
@@ -2088,6 +2096,11 @@ func (api *API) notificationsSSE(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) remoteRead(w http.ResponseWriter, r *http.Request) {
+	if api.memoryLimiter != nil && !api.memoryLimiter.AllowRemoteRead() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Service Unavailable: Memory limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
 	// This is only really for tests - this will never be nil IRL.
 	if api.remoteReadHandler != nil {
 		api.remoteReadHandler.ServeHTTP(w, r)
@@ -2097,6 +2110,11 @@ func (api *API) remoteRead(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) remoteWrite(w http.ResponseWriter, r *http.Request) {
+	if api.memoryLimiter != nil && !api.memoryLimiter.AllowRemoteWrite() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Service Unavailable: Memory limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
 	if api.remoteWriteHandler != nil {
 		api.remoteWriteHandler.ServeHTTP(w, r)
 	} else {
@@ -2105,6 +2123,11 @@ func (api *API) remoteWrite(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) otlpWrite(w http.ResponseWriter, r *http.Request) {
+	if api.memoryLimiter != nil && !api.memoryLimiter.AllowOTLP() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Service Unavailable: Memory limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
 	if api.otlpWriteHandler != nil {
 		api.otlpWriteHandler.ServeHTTP(w, r)
 	} else {

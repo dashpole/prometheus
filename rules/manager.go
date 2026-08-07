@@ -38,6 +38,7 @@ import (
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/features"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/strutil"
 )
 
@@ -143,6 +144,9 @@ type ManagerOptions struct {
 
 	// Parser is the PromQL parser used for parsing rule expressions.
 	Parser parser.Parser
+
+	// MemoryLimiter is used to skip recording rules evaluation under memory pressure.
+	MemoryLimiter memorylimiter.MemoryLimiter
 }
 
 // NewManager returns an implementation of Manager, ready to be started

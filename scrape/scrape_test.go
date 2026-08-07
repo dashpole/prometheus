@@ -71,6 +71,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/pool"
 	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
@@ -7961,4 +7962,90 @@ func TestScrapeOffsetDistribution(t *testing.T) {
 			require.Greater(t, len(uniqueTimes), 2, "Expected targets to be scraped at staggered offsets rather than simultaneously at scrape index %d", i)
 		}
 	})
+}
+
+type mockMemoryLimiter struct {
+	allowScrape bool
+}
+
+func (m *mockMemoryLimiter) State() memorylimiter.LimiterState {
+	if m.allowScrape {
+		return memorylimiter.StateOK
+	}
+	return memorylimiter.StateHardLimit
+}
+func (m *mockMemoryLimiter) AllowScrape() bool                               { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowOTLP() bool                                 { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRemoteWrite() bool                          { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRemoteRead() bool                           { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowFederation() bool                           { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowBlockCompaction() bool                      { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRecordingRules() bool                      { return m.allowScrape }
+func (m *mockMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
+func (m *mockMemoryLimiter) Start(context.Context)                           {}
+func (m *mockMemoryLimiter) Stop()                                           {}
+
+func TestScrapeLoop_MemoryLimiterAbort(t *testing.T) {
+	for _, appV2 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("appV2=%t", appV2), func(t *testing.T) {
+			s := teststorage.New(t)
+			defer s.Close()
+
+			limiter := &mockMemoryLimiter{allowScrape: false}
+			sa := selectAppendable(s, appV2)
+			metrics := newTestScrapeMetrics(t)
+			cfg := &config.ScrapeConfig{
+				JobName:                    "test",
+				ScrapeInterval:             model.Duration(100 * time.Millisecond),
+				ScrapeTimeout:              model.Duration(100 * time.Millisecond),
+				MetricNameValidationScheme: model.UTF8Validation,
+				MetricNameEscapingScheme:   model.AllowUTF8,
+			}
+			sp, err := newScrapePool(
+				cfg,
+				sa.V1(),
+				sa.V2(),
+				0,
+				nil,
+				nil,
+				&Options{MemoryLimiter: limiter},
+				metrics,
+			)
+			require.NoError(t, err)
+			defer sp.stop()
+
+			target := NewTarget(labels.FromStrings(model.AddressLabel, "localhost:9090"), cfg, nil, nil)
+			scraper := &testScraper{}
+			sl := newScrapeLoop(scrapeLoopOptions{
+				target:   target,
+				scraper:  scraper,
+				cache:    newScrapeCache(metrics),
+				interval: 100 * time.Millisecond,
+				timeout:  100 * time.Millisecond,
+				sp:       sp,
+			})
+
+			errc := make(chan error, 1)
+			sl.scrapeAndReport(time.Time{}, time.Now(), errc)
+
+			select {
+			case err := <-errc:
+				require.Equal(t, errScrapeMemoryLimitExceeded, err)
+			default:
+				t.Fatal("expected errScrapeMemoryLimitExceeded")
+			}
+
+			require.Equal(t, errScrapeMemoryLimitExceeded, scraper.lastError)
+
+			// Verify that targetScrapesSkipped metric was incremented.
+			require.Equal(t, float64(1), prom_testutil.ToFloat64(metrics.targetScrapesSkipped))
+
+			// Query storage to assert 0 samples were appended (NO up=0 sample in storage!).
+			q, err := s.Querier(0, time.Now().UnixNano())
+			require.NoError(t, err)
+			defer q.Close()
+			seriesSet := q.Select(t.Context(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "up"))
+			require.False(t, seriesSet.Next(), "expected no series appended to storage on memory limiter abort")
+		})
+	}
 }

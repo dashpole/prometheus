@@ -56,6 +56,7 @@ import (
 	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/logging"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/pool"
 )
 
@@ -698,7 +699,10 @@ type targetScraper struct {
 	metrics *scrapeMetrics
 }
 
-var errBodySizeLimit = errors.New("body size limit exceeded")
+var (
+	errBodySizeLimit             = errors.New("body size limit exceeded")
+	errScrapeMemoryLimitExceeded = errors.New("memory limit exceeded")
+)
 
 // acceptHeader transforms preference from the options into specific header values as
 // https://www.rfc-editor.org/rfc/rfc9110.html#name-accept defines.
@@ -884,6 +888,7 @@ type scrapeLoop struct {
 	skipJitterOffsetting    bool // For testability.
 	scrapeOnShutdown        bool
 	initialScrapeOffset     time.Duration
+	memoryLimiter           memorylimiter.MemoryLimiter
 	// error injection through setForcedError.
 	forcedErr    error
 	forcedErrMtx sync.Mutex
@@ -1241,6 +1246,7 @@ func newScrapeLoop(opts scrapeLoopOptions) *scrapeLoop {
 		skipJitterOffsetting:    opts.sp.options.skipJitterOffsetting,
 		scrapeOnShutdown:        opts.sp.options.ScrapeOnShutdown,
 		initialScrapeOffset:     opts.sp.options.InitialScrapeOffset,
+		memoryLimiter:           opts.sp.options.MemoryLimiter,
 	}
 }
 
@@ -1359,6 +1365,20 @@ func (sl *scrapeLoop) scrapeAndReport(last, appendTime time.Time, errc chan<- er
 
 	var total, added, seriesAdded, bytesRead int
 	var err, appErr, scrapeErr error
+
+	// Check if scrape is allowed by memory limiter.
+	if sl.memoryLimiter != nil && !sl.memoryLimiter.AllowScrape() {
+		sl.metrics.targetScrapesSkipped.Inc()
+		scrapeErr = errScrapeMemoryLimitExceeded
+		sl.scraper.Report(start, 0, scrapeErr)
+		if errc != nil {
+			select {
+			case errc <- scrapeErr:
+			case <-sl.ctx.Done():
+			}
+		}
+		return start
+	}
 
 	app := sl.appender()
 	defer func() {

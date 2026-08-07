@@ -84,6 +84,7 @@ import (
 	"github.com/prometheus/prometheus/util/documentcli"
 	"github.com/prometheus/prometheus/util/features"
 	"github.com/prometheus/prometheus/util/logging"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/notifications"
 	prom_runtime "github.com/prometheus/prometheus/util/runtime"
 	"github.com/prometheus/prometheus/web"
@@ -217,6 +218,7 @@ type flagConfig struct {
 	enablePerStepStats       bool
 	enableConcurrentRuleEval bool
 	useStartTimestamps       bool
+	enableMemoryLimiter      bool
 
 	prometheusURL   string
 	corsRegexString string
@@ -345,6 +347,9 @@ func (c *flagConfig) setFeatureListOptions(logger *slog.Logger) error {
 			case "search-api":
 				c.web.EnableSearch = true
 				logger.Info("Experimental search API enabled.")
+			case "memory-limiter":
+				c.enableMemoryLimiter = true
+				logger.Info("Experimental memory limiter is enabled.")
 			default:
 				logger.Warn("Unknown option for --enable-feature", "option", o)
 			}
@@ -378,6 +383,7 @@ func main() {
 			collectors.NewGoCollector(
 				collectors.WithGoCollectorRuntimeMetrics(
 					collectors.MetricsGC,
+					collectors.MetricsMemory,
 					collectors.MetricsScheduler,
 					collectors.GoRuntimeMetricsRule{Matcher: goregexp.MustCompile(`^/sync/mutex/wait/total:seconds$`)},
 				),
@@ -645,7 +651,7 @@ func main() {
 	a.Flag("scrape.discovery-reload-interval", "Interval used by scrape manager to throttle target groups updates.").
 		Hidden().Default("5s").SetValue(&cfg.scrape.DiscoveryReloadInterval)
 
-	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-extended-range-selectors, promql-per-step-stats, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
+	a.Flag("enable-feature", "Comma separated feature names to enable. Valid options: concurrent-rule-eval, created-timestamp-zero-ingestion, delayed-compaction, exemplar-storage, extra-scrape-metrics, histograms-st-encoding, memory-limiter, memory-snapshot-on-shutdown, metadata-wal-records, old-ui, otlp-deltatocumulative, otlp-native-delta-ingestion, promql-binop-fill-modifiers, promql-delayed-name-removal, promql-experimental-functions, promql-extended-range-selectors, promql-per-step-stats, search-api, st-storage, st-synthesis, type-and-unit-labels, use-start-timestamps, use-uncached-io, xor2-encoding. See https://prometheus.io/docs/prometheus/latest/feature_flags/ for more details.").
 		StringsVar(&cfg.featureList)
 
 	a.Flag("agent", "Run Prometheus in 'Agent mode'.").BoolVar(&agentMode)
@@ -969,6 +975,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	var memoryLimiter memorylimiter.MemoryLimiter
+	if cfg.enableMemoryLimiter {
+		ml, err := memorylimiter.NewManager(&cfgFile.Runtime.MemoryLimiter, logger.With("component", "memory limiter"), prometheus.DefaultRegisterer)
+		if err != nil {
+			logger.Error("failed to create memory limiter", "err", err)
+			os.Exit(1)
+		}
+		memoryLimiter = ml
+		cfg.scrape.MemoryLimiter = ml
+		cfg.web.MemoryLimiter = ml
+	}
+
 	scrapeManager, err := scrape.NewManager(
 		&cfg.scrape,
 		logger.With("component", "scrape manager"),
@@ -1037,6 +1055,7 @@ func main() {
 			},
 			FeatureRegistry: features.DefaultRegistry,
 			Parser:          promqlParser,
+			MemoryLimiter:   memoryLimiter,
 		})
 	}
 
@@ -1201,6 +1220,14 @@ func main() {
 		}, {
 			name:     "tracing",
 			reloader: tracingManager.ApplyConfig,
+		}, {
+			name: "memory_limiter",
+			reloader: func(cfg *config.Config) error {
+				if memoryLimiter != nil {
+					return memoryLimiter.ApplyConfig(&cfg.Runtime.MemoryLimiter)
+				}
+				return nil
+			},
 		},
 	}
 
@@ -1291,6 +1318,20 @@ func main() {
 			func(error) {
 				logger.Info("Stopping notify discovery manager...")
 				cancelNotify()
+			},
+		)
+	}
+	if memoryLimiter != nil {
+		ctxML, cancelML := context.WithCancel(context.Background())
+		g.Add(
+			func() error {
+				memoryLimiter.Start(ctxML)
+				return nil
+			},
+			func(error) {
+				logger.Info("Stopping memory limiter...")
+				cancelML()
+				memoryLimiter.Stop()
 			},
 		)
 	}
