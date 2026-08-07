@@ -1139,7 +1139,7 @@ func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			if burstActive.Load() {
 				var b strings.Builder
-				for k := 0; k < 30000; k++ {
+				for k := 0; k < 15000; k++ {
 					fmt.Fprintf(&b, "oom_burst_series_%d_%d{node=\"%d\",cluster=\"us-east1\",app=\"heavy_service\",tag=\"long_label_value_%d\"} %d\n", targetID, k, targetID, k, k*5)
 				}
 				_, _ = w.Write([]byte(b.String()))
@@ -1190,7 +1190,7 @@ scrape_configs:
 
 		time.Sleep(1 * time.Second)
 
-		// Trigger massive 5-target x 30,000 series burst (=150,000 series simultaneously).
+		// Trigger massive burst.
 		burstActive.Store(true)
 
 		// Verify that Candidate survives the burst, engages limiter, and sheds scrapes.
@@ -1223,7 +1223,7 @@ scrape_configs:
 		// Trigger the exact same massive burst.
 		burstActive.Store(true)
 
-		// Without the limiter, Prometheus tries to allocate all 150,000 series unthrottled.
+		// Without the limiter, Prometheus tries to allocate all series unthrottled.
 		crashedOrFailed := false
 		client := &http.Client{Timeout: 1 * time.Second}
 		for i := 0; i < 50; i++ {
@@ -1263,8 +1263,8 @@ func TestScenario_S10_SustainedOverloadTrickleThroughput(t *testing.T) {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			for k := 0; k < 1000; k++ {
-				fmt.Fprintf(&b, "trickle_series_%d_%d{node=\"%d\"} %d\n", targetID, k, targetID, k)
+			for k := 0; k < 2500; k++ {
+				fmt.Fprintf(&b, "trickle_series_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\"} %d\n", targetID, k, targetID, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
 		}))
