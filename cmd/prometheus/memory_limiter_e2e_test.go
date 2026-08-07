@@ -1350,8 +1350,8 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 			successfulScrapes.Add(1)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			for k := 0; k < 1200; k++ {
-				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tier=\"backend\",service=\"data_ingest_pipeline\",component=\"processor_worker_%d\",region=\"us-central1-a\"} %d\n",
+			for k := 0; k < 500; k++ {
+				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tier=\"backend\",service=\"data_ingest_pipeline\",component=\"processor_worker_%d\",region=\"us-central1-a\",dc=\"zone-b\",agent=\"prom-collector\",version=\"v2.45.0\",team=\"observability\",priority=\"high\",traffic=\"live\"} %d\n",
 					targetID, k, targetID, k, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
