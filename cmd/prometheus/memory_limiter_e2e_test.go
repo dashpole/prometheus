@@ -1339,7 +1339,7 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 		}
 	}
 
-	numTargets := 8
+	numTargets := 6
 	servers := make([]*httptest.Server, numTargets)
 	targetAddrs := make([]string, numTargets)
 	var successfulScrapes atomic.Int64
@@ -1350,10 +1350,8 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 			successfulScrapes.Add(1)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			for k := 0; k < 350; k++ {
-				fmt.Fprintf(&b, "# HELP sustained_stress_%d_%d Extended documentation text to simulate high transient memory allocation during parse waves.\n", targetID, k)
-				fmt.Fprintf(&b, "# TYPE sustained_stress_%d_%d gauge\n", targetID, k)
-				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",service=\"data_ingest_pipeline\",component=\"processor_worker_%d\",region=\"us-central1-a\"} %d\n",
+			for k := 0; k < 1200; k++ {
+				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tier=\"backend\",service=\"data_ingest_pipeline\",component=\"processor_worker_%d\",region=\"us-central1-a\"} %d\n",
 					targetID, k, targetID, k, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
