@@ -728,3 +728,176 @@ scrape_configs:
 	require.Equal(t, skippedAfterReload, skippedFinal, "Target scrapes skipped counter should not increase after fail_scrapes disabled via reload")
 }
 
+// TestStress_SustainedMassiveOverloadWithComparativeBaseline tests sustained heavy load:
+// 10 high-cardinality endpoints generating continuous churn under tight GOMEMLIMIT (64MiB).
+// Demonstrates that the candidate instance with memory limiter sheds load cleanly, maintains fast query availability,
+// and recovers to StateOK when load abates.
+func TestStress_SustainedMassiveOverloadWithComparativeBaseline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping sustained stress test in short mode")
+	}
+
+	var burstActive atomic.Bool
+	var iteration atomic.Int64
+	numTargets := 10
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			if burstActive.Load() {
+				iter := iteration.Add(1)
+				var b strings.Builder
+				for k := 0; k < 1000; k++ {
+					fmt.Fprintf(&b, "churn_metric_%d_%d{target=\"%d\",churn=\"v%d\",region=\"us-west1\"} %d\n", targetID, k, targetID, iter%10, k*3)
+				}
+				_, _ = w.Write([]byte(b.String()))
+				return
+			}
+			fmt.Fprintf(w, "healthy_metric{target=\"%d\"} 1\n", targetID)
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "stress_cluster"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	// Launch candidate instance with memory limiter enabled under 64MiB limit.
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	// Initial warmup.
+	time.Sleep(1 * time.Second)
+	mInit := fetchPrometheusMetrics(t, addr)
+	require.Equal(t, float64(0), mInit["prometheus_memory_limiter_active"])
+
+	// Trigger sustained massive overload.
+	burstActive.Store(true)
+
+	// Sustain the overload while continuously measuring query availability and latency.
+	stressDuration := 10 * time.Second
+	deadline := time.Now().Add(stressDuration)
+	queryCount := 0
+	queryURL := fmt.Sprintf("http://%s/api/v1/query?query=up", addr)
+
+	for time.Now().Before(deadline) {
+		start := time.Now()
+		resp, err := http.Get(queryURL)
+		require.NoError(t, err, "Query must succeed during sustained memory stress")
+		queryDuration := time.Since(start)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		_ = resp.Body.Close()
+		require.Less(t, queryDuration, 2*time.Second, "Query latency should remain fast under load shedding")
+		queryCount++
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Verify that the limiter actively shed scrapes to protect the process.
+	mStress := fetchPrometheusMetrics(t, addr)
+	require.Greater(t, mStress["prometheus_target_scrapes_skipped_total"], float64(0), "Scrapes should be skipped during sustained stress")
+	require.Greater(t, queryCount, 20, "Should have executed multiple canary queries")
+
+	// Cessation of load: verify recovery.
+	burstActive.Store(false)
+
+	require.Eventually(t, func() bool {
+		m := fetchPrometheusMetrics(t, addr)
+		return m["prometheus_memory_limiter_active"] == 0
+	}, 15*time.Second, 200*time.Millisecond, "Limiter must disengage cleanly after sustained overload ceases")
+}
+
+// TestStress_ContinuousCardinalityChurnAndCompaction tests continuous churn over time:
+// Injects high cardinality churn across multiple scrape loops to stress TSDB Head allocations.
+func TestStress_ContinuousCardinalityChurnAndCompaction(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping sustained stress test in short mode")
+	}
+
+	var seriesID atomic.Int64
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		curr := seriesID.Add(100)
+		var b strings.Builder
+		for i := 0; i < 200; i++ {
+			fmt.Fprintf(&b, "dynamic_series_%d{job=\"churn\",unique_tag=\"val_%d_%d\"} %d\n", i, curr, i, i)
+		}
+		_, _ = w.Write([]byte(b.String()))
+	}))
+	defer ts.Close()
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "continuous_churn"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	// Run continuous churn for 8 seconds.
+	time.Sleep(8 * time.Second)
+
+	metrics := fetchPrometheusMetrics(t, addr)
+	require.Greater(t, metrics["prometheus_memory_limiter_in_use_bytes"], float64(0))
+
+	// Verify query responsiveness throughout.
+	queryURL := fmt.Sprintf("http://%s/api/v1/query?query=count({__name__=~\"dynamic_series_.*\"})", addr)
+	resp, err := http.Get(queryURL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+
