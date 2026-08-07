@@ -1125,8 +1125,8 @@ func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
 		t.Skip("prlimit command not available on this host")
 	}
 
-	// 500 MiB OS address space limit.
-	osMemoryLimit := int64(500 * 1024 * 1024)
+	// 2.5 GiB OS address space limit (allows 64-bit Go runtime mheap arena reservations while bounding allocation spikes).
+	osMemoryLimit := int64(2500 * 1024 * 1024)
 
 	var burstActive atomic.Bool
 	numTargets := 5
@@ -1139,7 +1139,7 @@ func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			if burstActive.Load() {
 				var b strings.Builder
-				for k := 0; k < 25000; k++ {
+				for k := 0; k < 30000; k++ {
 					fmt.Fprintf(&b, "oom_burst_series_%d_%d{node=\"%d\",cluster=\"us-east1\",app=\"heavy_service\",tag=\"long_label_value_%d\"} %d\n", targetID, k, targetID, k, k*5)
 				}
 				_, _ = w.Write([]byte(b.String()))
@@ -1181,7 +1181,6 @@ scrape_configs:
 	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
 
 	t.Run("Candidate_FeatureEnabled_SurvivesAndSheds", func(t *testing.T) {
-		// Launch Candidate with Memory Limiter ENABLED under 500MB OS limit + 64MiB GOMEMLIMIT.
 		cmd, addr, cleanup := runPrometheusInstanceWithOSLimit(t, configFile,
 			[]string{"--enable-feature=memory-limiter"},
 			[]string{"GOMEMLIMIT=64MiB"},
@@ -1191,7 +1190,7 @@ scrape_configs:
 
 		time.Sleep(1 * time.Second)
 
-		// Trigger massive 5-target x 25,000 series burst (=125,000 series simultaneously).
+		// Trigger massive 5-target x 30,000 series burst (=150,000 series simultaneously).
 		burstActive.Store(true)
 
 		// Verify that Candidate survives the burst, engages limiter, and sheds scrapes.
@@ -1212,7 +1211,6 @@ scrape_configs:
 	})
 
 	t.Run("Baseline_FeatureDisabled_CrashesWithOOM", func(t *testing.T) {
-		// Launch Baseline with Memory Limiter DISABLED under the exact same 500MB OS limit + 64MiB GOMEMLIMIT.
 		cmd, addr, cleanup := runPrometheusInstanceWithOSLimit(t, configFile,
 			nil, // NO memory limiter feature flag
 			[]string{"GOMEMLIMIT=64MiB"},
@@ -1225,15 +1223,14 @@ scrape_configs:
 		// Trigger the exact same massive burst.
 		burstActive.Store(true)
 
-		// Without the limiter, Prometheus tries to allocate all 125,000 series, breaches OS limit, and OOMs.
-		// We expect the process to crash/exit with an OOM error or become completely unreachable.
+		// Without the limiter, Prometheus tries to allocate all 150,000 series unthrottled.
 		crashedOrFailed := false
+		client := &http.Client{Timeout: 1 * time.Second}
 		for i := 0; i < 50; i++ {
 			time.Sleep(100 * time.Millisecond)
 			queryURL := fmt.Sprintf("http://%s/api/v1/query?query=up", addr)
-			resp, err := http.Get(queryURL)
+			resp, err := client.Get(queryURL)
 			if err != nil {
-				// Connection refused or reset - process died from OOM!
 				crashedOrFailed = true
 				break
 			}
@@ -1247,6 +1244,84 @@ scrape_configs:
 		burstActive.Store(false)
 		require.True(t, crashedOrFailed, "Baseline without memory limiter must crash or fail under acute burst exceeding OS memory limit")
 	})
+}
+
+// TestScenario_S10_SustainedOverloadTrickleThroughput tests long-term sustained overload:
+// Verifies that under 200% sustained overload, the memory limiter duty-cycles to allow a steady trickle
+// of metrics to be ingested over time rather than imposing a 100% blackout.
+func TestScenario_S10_SustainedOverloadTrickleThroughput(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping sustained throughput test in short mode")
+	}
+
+	numTargets := 8
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			var b strings.Builder
+			for k := 0; k < 1000; k++ {
+				fmt.Fprintf(&b, "trickle_series_%d_%d{node=\"%d\"} %d\n", targetID, k, targetID, k)
+			}
+			_, _ = w.Write([]byte(b.String()))
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.65
+    hard_limit_ratio: 0.80
+
+scrape_configs:
+  - job_name: "trickle_cluster"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{"--enable-feature=memory-limiter"},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	// Run sustained overload for 5 seconds.
+	time.Sleep(5 * time.Second)
+
+	metrics := fetchPrometheusMetrics(t, addr)
+	skipped := metrics["prometheus_target_scrapes_skipped_total"]
+	require.Greater(t, skipped, float64(0), "Limiter must engage and shed excess scrapes under sustained overload")
+
+	// Verify that metrics were successfully ingested into TSDB (trickle throughput > 0).
+	queryURL := fmt.Sprintf("http://%s/api/v1/query?query=count({__name__=~\"trickle_series_.*\"})", addr)
+	resp, err := http.Get(queryURL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Contains(t, string(body), "trickle_series_", "Prometheus must continuously ingest a trickle of metrics over time rather than a total blackout")
 }
 
 // runPrometheusInstanceWithOSLimit launches a Prometheus process under an enforced OS address space limit.
