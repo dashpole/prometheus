@@ -1351,7 +1351,7 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
 			for k := 0; k < 500; k++ {
-				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"metric_payload_sample_%d\",service=\"data_ingest_pipeline\"} %d\n", targetID, k, targetID, k, k, k)
+				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"metric_payload_sample_%d\",service=\"data_ingest_pipeline\"} %d\n", targetID, k, targetID, k, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
 		}))
