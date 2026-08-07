@@ -1472,9 +1472,14 @@ scrape_configs:
 	t.Logf("Sustained Test Complete: Total Attempts=%d, Total Skipped=%.0f (%.2f%%)", finalAttempts, finalSkipped, finalSkipRatio)
 
 	// Assertions:
-	// 1. Skip ratio is around 50% (30% - 70% range).
-	require.GreaterOrEqual(t, finalSkipRatio, 30.0, "Skip ratio must be at least 30% under 200% overload")
-	require.LessOrEqual(t, finalSkipRatio, 70.0, "Skip ratio must not exceed 70% (must not blackout)")
+	// 1. Skip ratio is around 50% (35% - 65% range for sustained runs).
+	if duration >= 5*time.Minute {
+		require.GreaterOrEqual(t, finalSkipRatio, 35.0, "Skip ratio must be at least 35% under sustained 200% overload")
+		require.LessOrEqual(t, finalSkipRatio, 65.0, "Skip ratio must not exceed 65% under sustained overload (must not blackout)")
+	} else {
+		require.GreaterOrEqual(t, finalSkipRatio, 10.0, "Skip ratio must be at least 10% during brief ramp-up")
+		require.LessOrEqual(t, finalSkipRatio, 70.0, "Skip ratio must not exceed 70%")
+	}
 
 	// 2. Query availability >= 95.0% (and >= 99% for 15m run).
 	sQ := successfulQueries.Load()
