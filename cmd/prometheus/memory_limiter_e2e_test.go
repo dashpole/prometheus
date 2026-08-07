@@ -622,3 +622,94 @@ scrape_configs:
 	require.Greater(t, metrics["prometheus_target_scrapes_skipped_total"], float64(0), "Scrapes should be skipped under sustained overload")
 	require.Greater(t, metrics["prometheus_memory_limiter_in_use_bytes"], float64(0))
 }
+
+// TestScenario_S9_ConfigReloadDynamicEnforcement tests Scenario S9:
+// Dynamic config reload (POST /-/reload) shifts memory limiter check interval and enforcement modes without process restart.
+func TestScenario_S9_ConfigReloadDynamicEnforcement(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow scenario test in short mode")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		fmt.Fprintf(w, "reload_test_metric 1\n")
+	}))
+	defer ts.Close()
+
+	initialConfig := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.01
+    hard_limit_ratio: 0.02
+    enforcement:
+      fail_scrapes: true
+
+scrape_configs:
+  - job_name: "test_job"
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(initialConfig), 0o600))
+
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{
+			"--enable-feature=memory-limiter",
+			"--web.enable-lifecycle",
+		},
+		[]string{"GOMEMLIMIT=128MiB"},
+	)
+	defer cleanup()
+
+	time.Sleep(1 * time.Second)
+
+	// In initial config, fail_scrapes: true with ratios 0.01/0.02 forces scrapes to be skipped.
+	m1 := fetchPrometheusMetrics(t, addr)
+	require.Equal(t, float64(1), m1["prometheus_memory_limiter_active"])
+	skipped1 := m1["prometheus_target_scrapes_skipped_total"]
+	require.Greater(t, skipped1, float64(0))
+
+	// Reconfigure: disable fail_scrapes dynamically.
+	reloadedConfig := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 10ms
+    soft_limit_ratio: 0.01
+    hard_limit_ratio: 0.02
+    enforcement:
+      fail_scrapes: false
+
+scrape_configs:
+  - job_name: "test_job"
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	require.NoError(t, os.WriteFile(configFile, []byte(reloadedConfig), 0o600))
+
+	// Trigger lifecycle reload endpoint.
+	reloadURL := fmt.Sprintf("http://%s/-/reload", addr)
+	reloadResp, err := http.Post(reloadURL, "text/plain", nil)
+	require.NoError(t, err)
+	defer reloadResp.Body.Close()
+	require.Equal(t, http.StatusOK, reloadResp.StatusCode)
+
+	// Wait for reload to take effect and verify scrapes are no longer skipped.
+	time.Sleep(1 * time.Second)
+	m2 := fetchPrometheusMetrics(t, addr)
+	skipped2 := m2["prometheus_target_scrapes_skipped_total"]
+	require.Equal(t, skipped1, skipped2, "Target scrapes skipped counter should not increase after fail_scrapes disabled via reload")
+}
+
