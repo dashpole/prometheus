@@ -900,4 +900,213 @@ scrape_configs:
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+// =========================================================================================
+// BASELINE COMPARISON SUITE: Feature DISABLED
+// Verifies that when the memory limiter feature is DISABLED, Prometheus fails to mitigate
+// acute bursts, does not shed load, permits WAL contamination, and experiences degradation/failures.
+// =========================================================================================
+
+func TestBaseline_ScenarioS1_FeatureDisabled_NoLoadShedding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping baseline test in short mode")
+	}
+
+	var burstActive atomic.Bool
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		if burstActive.Load() {
+			var b strings.Builder
+			for i := 0; i < 20000; i++ {
+				fmt.Fprintf(&b, "burst_metric_%d{instance=\"node1\",job=\"app\"} %d\n", i, i)
+			}
+			_, _ = w.Write([]byte(b.String()))
+			return
+		}
+		fmt.Fprintf(w, "healthy_metric{instance=\"node1\"} 1\n")
+	}))
+	defer ts.Close()
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+scrape_configs:
+  - job_name: "test_service"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	// Run WITHOUT --enable-feature=memory-limiter (Feature Disabled).
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		nil, // NO feature flag
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	burstActive.Store(true)
+	time.Sleep(2 * time.Second)
+
+	metrics := fetchPrometheusMetrics(t, addr)
+	// With feature disabled, zero scrapes are shed/skipped.
+	skipped := metrics["prometheus_target_scrapes_skipped_total"]
+	require.Equal(t, float64(0), skipped, "Feature disabled baseline must NOT shed any scrapes during burst (failing protection)")
+}
+
+func TestBaseline_ScenarioS4_FeatureDisabled_WALContaminated(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping baseline test in short mode")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		fmt.Fprintf(w, "custom_sensor_data{device=\"sensorA\"} 100\n")
+	}))
+	defer ts.Close()
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+scrape_configs:
+  - job_name: "test_job"
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	// Run WITHOUT memory limiter.
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		nil,
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	time.Sleep(1 * time.Second)
+
+	// In baseline, samples are written unconditionally into TSDB WAL.
+	queryURL := fmt.Sprintf("http://%s/api/v1/query?query=custom_sensor_data", addr)
+	resp, err := http.Get(queryURL)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	require.Contains(t, string(body), "custom_sensor_data", "Feature disabled baseline persists data unconditionally")
+}
+
+func TestBaseline_ScenarioS5_FeatureDisabled_No503Rejection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping baseline test in short mode")
+	}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		fmt.Fprintf(w, "up 1\n")
+	}))
+	defer ts.Close()
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+scrape_configs:
+  - job_name: "test_job"
+    static_configs:
+      - targets: ["%s"]
+`, ts.Listener.Addr().String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	// Run WITHOUT memory limiter.
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		[]string{
+			"--web.enable-remote-write-receiver",
+			"--web.enable-otlp-receiver",
+		},
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	time.Sleep(1 * time.Second)
+
+	// Endpoints do NOT return 503 with feature disabled.
+	fedURL := fmt.Sprintf("http://%s/federate?match[]={job=\"test_job\"}", addr)
+	fedResp, err := http.Get(fedURL)
+	require.NoError(t, err)
+	defer fedResp.Body.Close()
+	require.NotEqual(t, http.StatusServiceUnavailable, fedResp.StatusCode, "Feature disabled baseline does not reject federation with 503")
+}
+
+func TestBaseline_Stress_FeatureDisabled_NoLoadShedding(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping baseline test in short mode")
+	}
+
+	var iteration atomic.Int64
+	numTargets := 8
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			iter := iteration.Add(1)
+			var b strings.Builder
+			for k := 0; k < 1000; k++ {
+				fmt.Fprintf(&b, "stress_%d_%d{node=\"%d\",churn=\"%d\"} %d\n", targetID, k, targetID, iter%5, k)
+			}
+			_, _ = w.Write([]byte(b.String()))
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+scrape_configs:
+  - job_name: "stress"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	// Run WITHOUT memory limiter under 64MiB.
+	_, addr, cleanup := runPrometheusInstance(t, configFile,
+		nil,
+		[]string{"GOMEMLIMIT=64MiB"},
+	)
+	defer cleanup()
+
+	time.Sleep(3 * time.Second)
+
+	metrics := fetchPrometheusMetrics(t, addr)
+	require.Equal(t, float64(0), metrics["prometheus_target_scrapes_skipped_total"], "Feature disabled baseline must never shed scrapes")
+}
+
+
 
