@@ -1352,8 +1352,8 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 			iter := iteration.Add(1)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			// 250 series per target with realistic multi-label payloads.
-			for k := 0; k < 250; k++ {
+			// 700 series per target with realistic multi-label payloads.
+			for k := 0; k < 700; k++ {
 				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"churn_%d\",service=\"data_ingest_pipeline\",component=\"processor_worker_%d\",region=\"us-central1-a\"} %d\n",
 					targetID, k, targetID, iter%2, k, k)
 			}
