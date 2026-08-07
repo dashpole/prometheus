@@ -1326,6 +1326,7 @@ func main() {
 		g.Add(
 			func() error {
 				memoryLimiter.Start(ctxML)
+				<-ctxML.Done()
 				return nil
 			},
 			func(error) {

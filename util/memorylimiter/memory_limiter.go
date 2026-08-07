@@ -64,6 +64,7 @@ type MemoryLimiter interface {
 
 type MemoryStats struct {
 	TotalBytes     uint64
+	FreeBytes      uint64
 	ReleasedBytes  uint64
 	GOMEMLIMIT     uint64
 	GCLimiterCycle uint64
@@ -74,6 +75,7 @@ type MetricsReader func() MemoryStats
 func defaultMetricsReader() MemoryStats {
 	samples := []metrics.Sample{
 		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
 		{Name: "/memory/classes/heap/released:bytes"},
 		{Name: "/gc/gomemlimit:bytes"},
 		{Name: "/gc/limiter/last-enabled:gc-cycle"},
@@ -84,13 +86,16 @@ func defaultMetricsReader() MemoryStats {
 		stats.TotalBytes = samples[0].Value.Uint64()
 	}
 	if samples[1].Value.Kind() == metrics.KindUint64 {
-		stats.ReleasedBytes = samples[1].Value.Uint64()
+		stats.FreeBytes = samples[1].Value.Uint64()
 	}
 	if samples[2].Value.Kind() == metrics.KindUint64 {
-		stats.GOMEMLIMIT = samples[2].Value.Uint64()
+		stats.ReleasedBytes = samples[2].Value.Uint64()
 	}
 	if samples[3].Value.Kind() == metrics.KindUint64 {
-		stats.GCLimiterCycle = samples[3].Value.Uint64()
+		stats.GOMEMLIMIT = samples[3].Value.Uint64()
+	}
+	if samples[4].Value.Kind() == metrics.KindUint64 {
+		stats.GCLimiterCycle = samples[4].Value.Uint64()
 	}
 	return stats
 }
@@ -234,6 +239,7 @@ func (m *Manager) Evaluate() {
 
 	stats := m.metricsReader()
 	totalBytes := stats.TotalBytes
+	freeBytes := stats.FreeBytes
 	releasedBytes := stats.ReleasedBytes
 	gomemlimit := stats.GOMEMLIMIT
 	gcLimiterCycle := stats.GCLimiterCycle
@@ -252,8 +258,8 @@ func (m *Manager) Evaluate() {
 	}
 
 	var inUse uint64
-	if totalBytes > releasedBytes {
-		inUse = totalBytes - releasedBytes
+	if totalBytes > (freeBytes + releasedBytes) {
+		inUse = totalBytes - (freeBytes + releasedBytes)
 	}
 	m.lastInUse.Store(inUse)
 
