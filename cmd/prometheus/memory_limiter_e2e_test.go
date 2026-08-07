@@ -1343,15 +1343,17 @@ func TestStress_15MinuteSustainedOverload50PercentShedding(t *testing.T) {
 	servers := make([]*httptest.Server, numTargets)
 	targetAddrs := make([]string, numTargets)
 	var successfulScrapes atomic.Int64
+	var iteration atomic.Int64
 
 	for i := 0; i < numTargets; i++ {
 		targetID := i
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			successfulScrapes.Add(1)
+			iter := iteration.Add(1)
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			var b strings.Builder
-			for k := 0; k < 500; k++ {
-				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"metric_payload_sample_%d\",service=\"data_ingest_pipeline\"} %d\n", targetID, k, targetID, k, k)
+			for k := 0; k < 800; k++ {
+				fmt.Fprintf(&b, "sustained_stress_%d_%d{node=\"%d\",cluster=\"us-central1\",pool=\"prod\",env=\"live\",tag=\"churn_tag_%d\",service=\"data_ingest_pipeline\"} %d\n", targetID, k, targetID, (iter/10)%20, k)
 			}
 			_, _ = w.Write([]byte(b.String()))
 		}))
