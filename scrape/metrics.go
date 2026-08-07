@@ -57,6 +57,7 @@ type scrapeMetrics struct {
 	targetScrapePoolExceededLabelLimits    prometheus.Counter
 	targetScrapeNativeHistogramBucketLimit prometheus.Counter
 	targetScrapeDuration                   prometheus.Histogram
+	targetScrapesSkipped                   prometheus.Counter
 }
 
 func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
@@ -263,6 +264,13 @@ func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
 		},
 	)
 
+	sm.targetScrapesSkipped = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "prometheus_target_scrapes_skipped_total",
+			Help: "Total number of target scrapes skipped due to memory limits.",
+		},
+	)
+
 	for _, collector := range []prometheus.Collector{
 		// Used by Manager.
 		sm.targetMetadataCache,
@@ -295,6 +303,7 @@ func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
 		sm.targetScrapePoolExceededLabelLimits,
 		sm.targetScrapeNativeHistogramBucketLimit,
 		sm.targetScrapeDuration,
+		sm.targetScrapesSkipped,
 	} {
 		err := reg.Register(collector)
 		if err != nil {

@@ -528,6 +528,13 @@ func (g *Group) Eval(ctx context.Context, ts time.Time) {
 			logger = logger.With("trace_id", sp.SpanContext().TraceID())
 		}
 
+		if _, isAlert := rule.(*AlertingRule); !isAlert {
+			if g.opts.MemoryLimiter != nil && !g.opts.MemoryLimiter.AllowRecordingRules() {
+				g.metrics.IterationsMissed.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
+				return
+			}
+		}
+
 		g.metrics.EvalTotal.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
 
 		vector, err := rule.Eval(ctx, ruleQueryOffset, ts, g.opts.QueryFunc, g.opts.ExternalURL, g.Limit())

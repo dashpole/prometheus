@@ -61,6 +61,7 @@ import (
 	"github.com/prometheus/prometheus/template"
 	"github.com/prometheus/prometheus/util/features"
 	"github.com/prometheus/prometheus/util/httputil"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/netconnlimit"
 	"github.com/prometheus/prometheus/util/notifications"
 	api_v1 "github.com/prometheus/prometheus/web/api/v1"
@@ -320,6 +321,9 @@ type Options struct {
 
 	// Parser is the PromQL parser used for parsing query expressions.
 	Parser parser.Parser
+
+	// MemoryLimiter is used to reject ingestion/queries under memory pressure.
+	MemoryLimiter memorylimiter.MemoryLimiter
 }
 
 // New initializes a new web Handler.
@@ -435,6 +439,9 @@ func New(logger *slog.Logger, o *Options) *Handler {
 		},
 		o.Parser,
 	)
+	if o.MemoryLimiter != nil {
+		h.apiV1.SetMemoryLimiter(o.MemoryLimiter)
+	}
 
 	if r := o.FeatureRegistry; r != nil {
 		// Set dynamic API features (based on configuration).

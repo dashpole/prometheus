@@ -196,6 +196,23 @@ var (
 		GoGC: getGoGC(),
 	}
 
+	DefaultMemoryLimiterConfig = MemoryLimiterConfig{
+		CheckInterval:  model.Duration(100 * time.Millisecond),
+		SoftLimitRatio: 0.70,
+		HardLimitRatio: 0.85,
+		Enforcement:    DefaultMemoryLimiterEnforcement,
+	}
+
+	DefaultMemoryLimiterEnforcement = MemoryLimiterEnforcement{
+		PauseBlockCompaction: true,
+		RejectRemoteRead:     true,
+		RejectFederation:     true,
+		FailScrapes:          true,
+		RejectOTLP:           true,
+		RejectRemoteWrite:    true,
+		PauseRecordingRules:  true,
+	}
+
 	// DefaultScrapeConfig is the default scrape configuration. Users of this
 	// default MUST call Validate() on the config after creation, even if it's
 	// used unaltered, to check for parameter correctness and fill out default
@@ -735,25 +752,82 @@ type RuntimeConfig struct {
 	// The Go garbage collection target percentage.
 	GoGC int `yaml:"gogc,omitempty"`
 
-	// Below are guidelines for adding a new field:
-	//
-	// For config that shouldn't change after startup, you might want to use
-	// flags https://prometheus.io/docs/prometheus/latest/command-line/prometheus/.
-	//
-	// Consider when the new field is first applied: at the very beginning of instance
-	// startup, after the TSDB is loaded etc. See https://github.com/prometheus/prometheus/pull/16491
-	// for an example.
-	//
-	// Provide a test covering various scenarios: empty config file, empty or incomplete runtime
-	// config block, precedence over other inputs (e.g., env vars, if applicable) etc.
-	// See TestRuntimeGOGCConfig (or https://github.com/prometheus/prometheus/pull/15238).
-	// The test should also verify behavior on reloads, since this config should be
-	// adjustable at runtime.
+	MemoryLimiter MemoryLimiterConfig `yaml:"memory_limiter,omitempty"`
+}
+
+// MemoryLimiterConfig configures the global memory limiter.
+type MemoryLimiterConfig struct {
+	CheckInterval  model.Duration           `yaml:"check_interval,omitempty"`
+	SoftLimitRatio float64                  `yaml:"soft_limit_ratio,omitempty"`
+	HardLimitRatio float64                  `yaml:"hard_limit_ratio,omitempty"`
+	Enforcement    MemoryLimiterEnforcement `yaml:"enforcement,omitempty"`
+}
+
+// MemoryLimiterEnforcement configures which mitigations are enabled.
+type MemoryLimiterEnforcement struct {
+	// Soft Limit mitigations
+	PauseBlockCompaction bool `yaml:"pause_block_compaction,omitempty"`
+	RejectRemoteRead     bool `yaml:"reject_remote_read,omitempty"`
+	RejectFederation     bool `yaml:"reject_federation,omitempty"`
+
+	// Hard Limit mitigations
+	FailScrapes         bool `yaml:"fail_scrapes,omitempty"`
+	RejectOTLP          bool `yaml:"reject_otlp,omitempty"`
+	RejectRemoteWrite   bool `yaml:"reject_remote_write,omitempty"`
+	PauseRecordingRules bool `yaml:"pause_recording_rules,omitempty"`
+}
+
+// isZero returns true iff the memory limiter config is the zero value.
+func (c *MemoryLimiterConfig) isZero() bool {
+	return c.CheckInterval == 0 && c.SoftLimitRatio == 0 && c.HardLimitRatio == 0 && c.Enforcement.isZero()
+}
+
+// isZero returns true iff the enforcement config is the zero value.
+func (e *MemoryLimiterEnforcement) isZero() bool {
+	return !e.PauseBlockCompaction && !e.RejectRemoteRead && !e.RejectFederation &&
+		!e.FailScrapes && !e.RejectOTLP && !e.RejectRemoteWrite && !e.PauseRecordingRules
+}
+
+// Validate validates the memory limiter configuration.
+func (c *MemoryLimiterConfig) Validate() error {
+	if c.isZero() {
+		return nil
+	}
+	if c.CheckInterval <= 0 {
+		return errors.New("memory_limiter check_interval must be greater than 0")
+	}
+	if c.SoftLimitRatio <= 0 || c.SoftLimitRatio > 1.0 {
+		return fmt.Errorf("memory_limiter soft_limit_ratio must be between 0 and 1 (exclusive), got %f", c.SoftLimitRatio)
+	}
+	if c.HardLimitRatio <= 0 || c.HardLimitRatio > 1.0 {
+		return fmt.Errorf("memory_limiter hard_limit_ratio must be between 0 and 1 (exclusive), got %f", c.HardLimitRatio)
+	}
+	if c.SoftLimitRatio > c.HardLimitRatio {
+		return fmt.Errorf("memory_limiter soft_limit_ratio (%f) cannot be greater than hard_limit_ratio (%f)", c.SoftLimitRatio, c.HardLimitRatio)
+	}
+	return nil
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *RuntimeConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	*c = DefaultRuntimeConfig
+	type plain RuntimeConfig
+	return unmarshal((*plain)(c))
+}
+
+// UnmarshalYAML implements the yaml.Unmarshaler interface.
+func (c *MemoryLimiterConfig) UnmarshalYAML(unmarshal func(any) error) error {
+	*c = DefaultMemoryLimiterConfig
+	type plain MemoryLimiterConfig
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	return c.Validate()
 }
 
 // isZero returns true iff the global config is the zero value.
 func (c *RuntimeConfig) isZero() bool {
-	return c.GoGC == 0
+	return c.GoGC == 0 && c.MemoryLimiter.isZero()
 }
 
 type ScrapeConfigs struct {

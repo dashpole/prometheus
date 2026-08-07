@@ -53,6 +53,12 @@ func registerFederationMetrics(r prometheus.Registerer) {
 }
 
 func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
+	if h.options.MemoryLimiter != nil && !h.options.MemoryLimiter.AllowFederation() {
+		w.Header().Set("Retry-After", "5")
+		http.Error(w, "Service Unavailable: Memory limit exceeded", http.StatusServiceUnavailable)
+		return
+	}
+
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
 
