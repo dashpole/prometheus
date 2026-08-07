@@ -38,6 +38,7 @@ import (
 	"go.uber.org/atomic"
 	"go.yaml.in/yaml/v2"
 
+	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/model/timestamp"
@@ -49,6 +50,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/tsdbutil"
+	"github.com/prometheus/prometheus/util/memorylimiter"
 	"github.com/prometheus/prometheus/util/stats"
 	"github.com/prometheus/prometheus/util/teststorage"
 	prom_testutil "github.com/prometheus/prometheus/util/testutil"
@@ -2808,3 +2810,74 @@ func (*closeCountingQuery) Statement() parser.Statement { return nil }
 func (*closeCountingQuery) Stats() *stats.Statistics    { return nil }
 func (*closeCountingQuery) Cancel()                     {}
 func (*closeCountingQuery) String() string              { return "" }
+
+type mockRuleMemoryLimiter struct {
+	allowRecordingRules bool
+}
+
+func (m *mockRuleMemoryLimiter) State() memorylimiter.LimiterState {
+	return memorylimiter.StateHardLimit
+}
+func (m *mockRuleMemoryLimiter) AllowScrape() bool                               { return true }
+func (m *mockRuleMemoryLimiter) AllowOTLP() bool                                 { return true }
+func (m *mockRuleMemoryLimiter) AllowRemoteWrite() bool                          { return true }
+func (m *mockRuleMemoryLimiter) AllowRemoteRead() bool                           { return true }
+func (m *mockRuleMemoryLimiter) AllowFederation() bool                           { return true }
+func (m *mockRuleMemoryLimiter) AllowBlockCompaction() bool                      { return true }
+func (m *mockRuleMemoryLimiter) AllowRecordingRules() bool                      { return m.allowRecordingRules }
+func (m *mockRuleMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
+func (m *mockRuleMemoryLimiter) Start(context.Context)                           {}
+func (m *mockRuleMemoryLimiter) Stop()                                           {}
+
+func TestGroup_MemoryLimiterRecordingRuleSkipping(t *testing.T) {
+	storage := teststorage.New(t)
+	defer storage.Close()
+
+	var alertFired atomic.Bool
+	notifyFunc := func(ctx context.Context, expr string, alerts ...*Alert) {
+		alertFired.Store(true)
+	}
+
+	queryFunc := func(ctx context.Context, q string, ts time.Time) (promql.Vector, error) {
+		return promql.Vector{
+			promql.Sample{
+				Metric: labels.FromStrings("__name__", "up", "job", "test"),
+				T:      ts.UnixMilli(),
+				F:      1,
+			},
+		}, nil
+	}
+
+	opts := &ManagerOptions{
+		Appendable:    storage,
+		QueryFunc:     queryFunc,
+		NotifyFunc:    notifyFunc,
+		Context:       context.Background(),
+		Logger:        promslog.NewNopLogger(),
+		MemoryLimiter: &mockRuleMemoryLimiter{allowRecordingRules: false},
+		Metrics:       NewGroupMetrics(prometheus.NewRegistry()),
+	}
+
+	parsedExpr, err := testParser.ParseExpr("up == 1")
+	require.NoError(t, err)
+
+	recRule := NewRecordingRule("job:up:count", parsedExpr, labels.EmptyLabels())
+	alertRule := NewAlertingRule("InstanceUp", parsedExpr, time.Second, 0, labels.EmptyLabels(), labels.EmptyLabels(), labels.EmptyLabels(), "", true, promslog.NewNopLogger())
+
+	group := NewGroup(GroupOptions{
+		Name:     "test_group",
+		File:     "test_file.yml",
+		Interval: time.Minute,
+		Rules:    []Rule{recRule, alertRule},
+		Opts:     opts,
+	})
+
+	// Run single evaluation cycle.
+	group.Eval(context.Background(), time.Now())
+
+	// 1. Verify recording rule was skipped (IterationsMissed incremented, no sample persisted).
+	require.Equal(t, float64(1), testutil.ToFloat64(opts.Metrics.IterationsMissed.WithLabelValues(GroupKey("test_file.yml", "test_group"))))
+
+	// 2. Verify alerting rule in the SAME group was NOT skipped and fired alerts.
+	require.True(t, alertFired.Load(), "Alerting rule should be evaluated even when recording rule is skipped")
+}
