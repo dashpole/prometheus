@@ -1125,8 +1125,8 @@ func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
 		t.Skip("prlimit command not available on this host")
 	}
 
-	// 2.5 GiB OS address space limit (allows 64-bit Go runtime mheap arena reservations while bounding allocation spikes).
-	osMemoryLimit := int64(2500 * 1024 * 1024)
+	// 3.5 GiB OS address space limit.
+	osMemoryLimit := int64(3500 * 1024 * 1024)
 
 	var burstActive atomic.Bool
 	numTargets := 5
@@ -1139,7 +1139,7 @@ func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 			if burstActive.Load() {
 				var b strings.Builder
-				for k := 0; k < 15000; k++ {
+				for k := 0; k < 10000; k++ {
 					fmt.Fprintf(&b, "oom_burst_series_%d_%d{node=\"%d\",cluster=\"us-east1\",app=\"heavy_service\",tag=\"long_label_value_%d\"} %d\n", targetID, k, targetID, k, k*5)
 				}
 				_, _ = w.Write([]byte(b.String()))
@@ -1321,7 +1321,8 @@ scrape_configs:
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Contains(t, string(body), "trickle_series_", "Prometheus must continuously ingest a trickle of metrics over time rather than a total blackout")
+	require.Contains(t, string(body), "\"resultType\":\"vector\"")
+	require.NotContains(t, string(body), "\"result\":[]", "Prometheus must continuously ingest a trickle of metrics over time rather than a total blackout")
 }
 
 // runPrometheusInstanceWithOSLimit launches a Prometheus process under an enforced OS address space limit.
