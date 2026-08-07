@@ -1108,5 +1108,199 @@ scrape_configs:
 	require.Equal(t, float64(0), metrics["prometheus_target_scrapes_skipped_total"], "Feature disabled baseline must never shed scrapes")
 }
 
+// =========================================================================================
+// REAL KERNEL / OS OOM VERIFICATION TEST
+// Runs Prometheus under an OS-enforced virtual memory limit (prlimit --as=...) with a massive burst:
+// 1. Baseline (Limiter DISABLED): Process exceeds OS memory limit, crashes with fatal OOM kill.
+// 2. Candidate (Limiter ENABLED): Limiter sheds scrape burst, memory stays within bounds, process SURVIVES.
+// =========================================================================================
+
+func TestRealOOM_BaselineCrashesVsCandidateSurvives(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping slow OOM test in short mode")
+	}
+
+	// Check if prlimit is available on this system.
+	if _, err := exec.LookPath("prlimit"); err != nil {
+		t.Skip("prlimit command not available on this host")
+	}
+
+	// 500 MiB OS address space limit.
+	osMemoryLimit := int64(500 * 1024 * 1024)
+
+	var burstActive atomic.Bool
+	numTargets := 5
+	servers := make([]*httptest.Server, numTargets)
+	targetAddrs := make([]string, numTargets)
+
+	for i := 0; i < numTargets; i++ {
+		targetID := i
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			if burstActive.Load() {
+				var b strings.Builder
+				for k := 0; k < 25000; k++ {
+					fmt.Fprintf(&b, "oom_burst_series_%d_%d{node=\"%d\",cluster=\"us-east1\",app=\"heavy_service\",tag=\"long_label_value_%d\"} %d\n", targetID, k, targetID, k, k*5)
+				}
+				_, _ = w.Write([]byte(b.String()))
+				return
+			}
+			fmt.Fprintf(w, "healthy_metric{node=\"%d\"} 1\n", targetID)
+		}))
+		defer s.Close()
+		servers[i] = s
+		targetAddrs[i] = s.Listener.Addr().String()
+	}
+
+	var targetsYAML strings.Builder
+	for _, addr := range targetAddrs {
+		targetsYAML.WriteString(fmt.Sprintf("      - targets: [\"%s\"]\n", addr))
+	}
+
+	promConfigContent := fmt.Sprintf(`
+global:
+  scrape_interval: 100ms
+  scrape_timeout: 100ms
+
+runtime:
+  gogc: 50
+  memory_limiter:
+    check_interval: 20ms
+    soft_limit_ratio: 0.70
+    hard_limit_ratio: 0.85
+
+scrape_configs:
+  - job_name: "oom_test"
+    scrape_interval: 100ms
+    scrape_timeout: 100ms
+    static_configs:
+%s
+`, targetsYAML.String())
+
+	configFile := filepath.Join(t.TempDir(), "prometheus.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte(promConfigContent), 0o600))
+
+	t.Run("Candidate_FeatureEnabled_SurvivesAndSheds", func(t *testing.T) {
+		// Launch Candidate with Memory Limiter ENABLED under 500MB OS limit + 64MiB GOMEMLIMIT.
+		cmd, addr, cleanup := runPrometheusInstanceWithOSLimit(t, configFile,
+			[]string{"--enable-feature=memory-limiter"},
+			[]string{"GOMEMLIMIT=64MiB"},
+			osMemoryLimit,
+		)
+		defer cleanup()
+
+		time.Sleep(1 * time.Second)
+
+		// Trigger massive 5-target x 25,000 series burst (=125,000 series simultaneously).
+		burstActive.Store(true)
+
+		// Verify that Candidate survives the burst, engages limiter, and sheds scrapes.
+		require.Eventually(t, func() bool {
+			m := fetchPrometheusMetrics(t, addr)
+			return m["prometheus_target_scrapes_skipped_total"] > 0
+		}, 10*time.Second, 100*time.Millisecond, "Candidate with memory limiter must engage and shed scrapes without crashing")
+
+		// Verify process is still alive.
+		queryURL := fmt.Sprintf("http://%s/api/v1/query?query=up", addr)
+		resp, err := http.Get(queryURL)
+		require.NoError(t, err, "Candidate process must remain alive and responsive under OS memory limit")
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		require.Nil(t, cmd.ProcessState, "Candidate process must not have exited/crashed")
+
+		burstActive.Store(false)
+	})
+
+	t.Run("Baseline_FeatureDisabled_CrashesWithOOM", func(t *testing.T) {
+		// Launch Baseline with Memory Limiter DISABLED under the exact same 500MB OS limit + 64MiB GOMEMLIMIT.
+		cmd, addr, cleanup := runPrometheusInstanceWithOSLimit(t, configFile,
+			nil, // NO memory limiter feature flag
+			[]string{"GOMEMLIMIT=64MiB"},
+			osMemoryLimit,
+		)
+		defer cleanup()
+
+		time.Sleep(1 * time.Second)
+
+		// Trigger the exact same massive burst.
+		burstActive.Store(true)
+
+		// Without the limiter, Prometheus tries to allocate all 125,000 series, breaches OS limit, and OOMs.
+		// We expect the process to crash/exit with an OOM error or become completely unreachable.
+		crashedOrFailed := false
+		for i := 0; i < 50; i++ {
+			time.Sleep(100 * time.Millisecond)
+			queryURL := fmt.Sprintf("http://%s/api/v1/query?query=up", addr)
+			resp, err := http.Get(queryURL)
+			if err != nil {
+				// Connection refused or reset - process died from OOM!
+				crashedOrFailed = true
+				break
+			}
+			_ = resp.Body.Close()
+			if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+				crashedOrFailed = true
+				break
+			}
+		}
+
+		burstActive.Store(false)
+		require.True(t, crashedOrFailed, "Baseline without memory limiter must crash or fail under acute burst exceeding OS memory limit")
+	})
+}
+
+// runPrometheusInstanceWithOSLimit launches a Prometheus process under an enforced OS address space limit.
+func runPrometheusInstanceWithOSLimit(t *testing.T, configFile string, extraArgs []string, env []string, osLimitBytes int64) (*exec.Cmd, string, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := listener.Addr().String()
+	require.NoError(t, listener.Close())
+
+	dir := t.TempDir()
+	dataPath := filepath.Join(dir, "data")
+
+	args := append([]string{
+		"-test.main",
+		"--config.file=" + configFile,
+		"--web.listen-address=" + addr,
+		"--storage.tsdb.path=" + dataPath,
+		"--storage.tsdb.retention.time=1d",
+		"--scrape.discovery-reload-interval=50ms",
+		"--log.level=info",
+	}, extraArgs...)
+
+	var cmd *exec.Cmd
+	if osLimitBytes > 0 {
+		prlimitArgs := append([]string{fmt.Sprintf("--as=%d", osLimitBytes), "--", promPath}, args...)
+		cmd = commandWithLogging(t, nil, "prlimit", prlimitArgs...)
+	} else {
+		cmd = commandWithLogging(t, nil, promPath, args...)
+	}
+	cmd.Env = append(os.Environ(), env...)
+
+	err = cmd.Start()
+	require.NoError(t, err)
+
+	readyURL := fmt.Sprintf("http://%s/-/ready", addr)
+	require.Eventually(t, func() bool {
+		resp, err := http.Get(readyURL)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 15*time.Second, 100*time.Millisecond, "Prometheus failed to become ready")
+
+	cleanup := func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	return cmd, addr, cleanup
+}
+
+
 
 
