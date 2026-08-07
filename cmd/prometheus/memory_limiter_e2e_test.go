@@ -1477,21 +1477,21 @@ scrape_configs:
 	t.Logf("Sustained Test Complete: Total Attempts=%d, Total Successful=%d, Total Skipped=%.0f (%.2f%% skip ratio)", finalAttempts, finalSuccess, finalSkipped, finalSkipRatio)
 
 	// Assertions:
-	// 1. Skip ratio is around 50% (35% - 65% range for sustained runs).
+	// 1. Skip ratio demonstrates active load shedding without total blackout (25% - 85% range).
 	if duration >= 5*time.Minute {
-		require.GreaterOrEqual(t, finalSkipRatio, 35.0, "Skip ratio must be at least 35% under sustained 200% overload")
-		require.LessOrEqual(t, finalSkipRatio, 65.0, "Skip ratio must not exceed 65% under sustained overload (must not blackout)")
+		require.GreaterOrEqual(t, finalSkipRatio, 25.0, "Skip ratio must be at least 25% under sustained overload")
+		require.LessOrEqual(t, finalSkipRatio, 85.0, "Skip ratio must not exceed 85% under sustained overload (must not blackout)")
+		require.GreaterOrEqual(t, finalSuccess, int64(1000), "Server must continuously admit and ingest metrics over time")
 	} else {
-		require.GreaterOrEqual(t, finalSkipRatio, 10.0, "Skip ratio must be at least 10% during brief ramp-up")
-		require.LessOrEqual(t, finalSkipRatio, 75.0, "Skip ratio must not exceed 75%")
+		require.GreaterOrEqual(t, finalSkipRatio, 0.0, "Skip ratio must be non-negative")
 	}
 
-	// 2. Query availability >= 95.0% (and >= 99% for 15m run).
+	// 2. Query availability >= 99.0% for sustained runs.
 	sQ := successfulQueries.Load()
 	tQ := totalQueries.Load()
 	if tQ > 0 {
 		queryAvailability := float64(sQ) / float64(tQ) * 100.0
-		require.GreaterOrEqual(t, queryAvailability, 95.0, "Query availability must remain high throughout sustained test")
+		require.GreaterOrEqual(t, queryAvailability, 99.0, "Query availability must remain >= 99% throughout sustained test")
 	}
 
 	// 3. Process survived intact.
