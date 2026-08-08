@@ -392,3 +392,10 @@ to this maximum, so an operator setting a smaller cap does not break
 no-`limit` requests. Setting the flag to `0` disables the cap entirely; this
 is **not recommended** for endpoints exposed beyond a trusted network because a
 single client can then request the entire index in one response.
+
+## Memory limiter
+
+`--enable-feature=memory-limiter`
+
+Enables experimental memory limiter monitoring and enforcement.
+
