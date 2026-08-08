@@ -79,8 +79,8 @@ type MemoryLimiter interface {
 	Stop()
 }
 
-// MemoryStats holds runtime memory statistics used by MemoryLimiter.
-type MemoryStats struct {
+// memoryStats holds runtime memory statistics used by MemoryLimiter.
+type memoryStats struct {
 	TotalBytes     uint64
 	FreeBytes      uint64
 	ReleasedBytes  uint64
@@ -88,10 +88,10 @@ type MemoryStats struct {
 	GCLimiterCycle uint64
 }
 
-// MetricsReader is a function that retrieves current runtime memory statistics.
-type MetricsReader func() MemoryStats
+// metricsReader is a function that retrieves current runtime memory statistics.
+type metricsReader func() memoryStats
 
-func defaultMetricsReader() MemoryStats {
+func defaultMetricsReader() memoryStats {
 	samples := []metrics.Sample{
 		{Name: "/memory/classes/total:bytes"},
 		{Name: "/memory/classes/heap/free:bytes"},
@@ -100,7 +100,7 @@ func defaultMetricsReader() MemoryStats {
 		{Name: "/gc/limiter/last-enabled:gc-cycle"},
 	}
 	metrics.Read(samples)
-	var stats MemoryStats
+	var stats memoryStats
 	for _, s := range samples {
 		if s.Value.Kind() != metrics.KindUint64 {
 			continue
@@ -134,7 +134,7 @@ type Manager struct {
 	gcLimiterInitialized bool
 	lastCheckTime        time.Time
 
-	metricsReader MetricsReader
+	metricsReader metricsReader
 	now           func() time.Time
 
 	metrics *memoryLimiterMetrics
@@ -272,6 +272,7 @@ func (m *Manager) Evaluate() {
 	gcLimiterCycle := stats.GCLimiterCycle
 
 	if m.config == nil || gomemlimit == 0 || gomemlimit == math.MaxInt64 {
+		m.lastCheckTime = m.now()
 		oldState := LimiterState(m.state.Swap(int32(StateOK)))
 		if oldState != StateOK {
 			m.metrics.transitionsTotal.WithLabelValues(oldState.String(), StateOK.String()).Inc()

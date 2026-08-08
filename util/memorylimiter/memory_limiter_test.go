@@ -26,9 +26,9 @@ import (
 	"github.com/prometheus/prometheus/config"
 )
 
-func newMockMetricsReader(total, released, gomemlimit, gcLimiterCycle uint64) MetricsReader {
-	return func() MemoryStats {
-		return MemoryStats{
+func newMockMetricsReader(total, released, gomemlimit, gcLimiterCycle uint64) metricsReader {
+	return func() memoryStats {
+		return memoryStats{
 			TotalBytes:     total,
 			ReleasedBytes:  released,
 			GOMEMLIMIT:     gomemlimit,
