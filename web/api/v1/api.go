@@ -2128,7 +2128,7 @@ func (api *API) otlpWrite(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    http.StatusServiceUnavailable,
+			"code":    14,
 			"message": "Service Unavailable: Memory limit exceeded",
 		})
 		return
