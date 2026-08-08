@@ -3588,3 +3588,74 @@ func TestGetScrapeConfigs_Loaded(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+func TestMemoryLimiterConfigValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		yamlStr     string
+		expectError bool
+	}{
+		{
+			name: "valid config",
+			yamlStr: `
+check_interval: 100ms
+soft_limit_ratio: 0.8
+hard_limit_ratio: 0.9
+enforcement:
+  fail_scrapes: true
+`,
+			expectError: false,
+		},
+		{
+			name: "invalid check_interval",
+			yamlStr: `
+check_interval: -1s
+soft_limit_ratio: 0.8
+hard_limit_ratio: 0.9
+`,
+			expectError: true,
+		},
+		{
+			name: "invalid soft_limit_ratio low",
+			yamlStr: `
+check_interval: 100ms
+soft_limit_ratio: 0.0
+hard_limit_ratio: 0.9
+`,
+			expectError: true,
+		},
+		{
+			name: "invalid hard_limit_ratio high",
+			yamlStr: `
+check_interval: 100ms
+soft_limit_ratio: 0.8
+hard_limit_ratio: 1.5
+`,
+			expectError: true,
+		},
+		{
+			name: "soft limit ratio greater than hard limit ratio",
+			yamlStr: `
+check_interval: 100ms
+soft_limit_ratio: 0.9
+hard_limit_ratio: 0.8
+`,
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var cfg MemoryLimiterConfig
+			err := yaml.UnmarshalStrict([]byte(tc.yamlStr), &cfg)
+			if err == nil {
+				err = cfg.Validate()
+			}
+			if tc.expectError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
