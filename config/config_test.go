@@ -113,7 +113,8 @@ var expectedConf = &Config{
 	},
 
 	Runtime: RuntimeConfig{
-		GoGC: globalGoGC,
+		GoGC:          globalGoGC,
+		MemoryLimiter: DefaultMemoryLimiterConfig,
 	},
 
 	RuleFiles: []string{
