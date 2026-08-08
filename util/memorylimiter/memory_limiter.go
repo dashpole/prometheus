@@ -27,14 +27,19 @@ import (
 	"github.com/prometheus/prometheus/config"
 )
 
+// LimiterState represents the current memory pressure level.
 type LimiterState int32
 
 const (
+	// StateOK indicates memory usage is below configured thresholds.
 	StateOK LimiterState = iota
+	// StateSoftLimit indicates memory usage has exceeded the soft limit threshold.
 	StateSoftLimit
+	// StateHardLimit indicates memory usage has exceeded the hard limit threshold.
 	StateHardLimit
 )
 
+// String returns the string representation of LimiterState.
 func (s LimiterState) String() string {
 	switch s {
 	case StateOK:
@@ -48,20 +53,33 @@ func (s LimiterState) String() string {
 	}
 }
 
+// MemoryLimiter provides memory pressure monitoring and enforcement controls.
 type MemoryLimiter interface {
+	// State returns the current memory limiter state.
 	State() LimiterState
+	// AllowScrape returns true if target scraping is allowed.
 	AllowScrape() bool
+	// AllowOTLP returns true if OTLP write requests are allowed.
 	AllowOTLP() bool
+	// AllowRemoteWrite returns true if remote write requests are allowed.
 	AllowRemoteWrite() bool
+	// AllowRemoteRead returns true if remote read requests are allowed.
 	AllowRemoteRead() bool
+	// AllowFederation returns true if federation requests are allowed.
 	AllowFederation() bool
+	// AllowBlockCompaction returns true if block compaction is allowed.
 	AllowBlockCompaction() bool
+	// AllowRecordingRules returns true if recording rules evaluation is allowed.
 	AllowRecordingRules() bool
+	// ApplyConfig updates the memory limiter configuration.
 	ApplyConfig(cfg *config.MemoryLimiterConfig) error
+	// Start starts periodic memory monitoring.
 	Start(ctx context.Context)
+	// Stop stops memory monitoring.
 	Stop()
 }
 
+// MemoryStats holds runtime memory statistics used by MemoryLimiter.
 type MemoryStats struct {
 	TotalBytes     uint64
 	FreeBytes      uint64
@@ -70,6 +88,7 @@ type MemoryStats struct {
 	GCLimiterCycle uint64
 }
 
+// MetricsReader is a function that retrieves current runtime memory statistics.
 type MetricsReader func() MemoryStats
 
 func defaultMetricsReader() MemoryStats {
@@ -100,6 +119,7 @@ func defaultMetricsReader() MemoryStats {
 	return stats
 }
 
+// Manager implements MemoryLimiter by tracking runtime memory usage and enforcing limits.
 type Manager struct {
 	logger *slog.Logger
 
@@ -122,6 +142,7 @@ type Manager struct {
 	wg       sync.WaitGroup
 }
 
+// NewManager initializes and returns a new Manager.
 func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg prometheus.Registerer) (*Manager, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -145,6 +166,7 @@ func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg promet
 	return m, nil
 }
 
+// ApplyConfig updates the Manager configuration.
 func (m *Manager) ApplyConfig(cfg *config.MemoryLimiterConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -165,6 +187,7 @@ func (m *Manager) ApplyConfig(cfg *config.MemoryLimiterConfig) error {
 	return nil
 }
 
+// State returns the current LimiterState.
 func (m *Manager) State() LimiterState {
 	if m == nil {
 		return StateOK
@@ -172,6 +195,7 @@ func (m *Manager) State() LimiterState {
 	return LimiterState(m.state.Load())
 }
 
+// Start starts periodic memory monitoring in the background.
 func (m *Manager) Start(ctx context.Context) {
 	m.mu.Lock()
 	if m.cancel != nil {
@@ -187,6 +211,7 @@ func (m *Manager) Start(ctx context.Context) {
 	go m.run(loopCtx)
 }
 
+// Stop stops the background memory monitoring loop.
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	if m.cancel != nil {
@@ -324,6 +349,7 @@ func (m *Manager) Evaluate() {
 	m.metrics.inUseBytes.Set(float64(inUse))
 }
 
+// AllowScrape returns true if scraping targets is allowed.
 func (m *Manager) AllowScrape() bool {
 	if m == nil {
 		return true
@@ -337,6 +363,7 @@ func (m *Manager) AllowScrape() bool {
 	return LimiterState(m.state.Load()) < StateHardLimit
 }
 
+// AllowOTLP returns true if OTLP ingestion is allowed.
 func (m *Manager) AllowOTLP() bool {
 	if m == nil {
 		return true
@@ -350,6 +377,7 @@ func (m *Manager) AllowOTLP() bool {
 	return LimiterState(m.state.Load()) < StateHardLimit
 }
 
+// AllowRemoteWrite returns true if remote write ingestion is allowed.
 func (m *Manager) AllowRemoteWrite() bool {
 	if m == nil {
 		return true
@@ -363,6 +391,7 @@ func (m *Manager) AllowRemoteWrite() bool {
 	return LimiterState(m.state.Load()) < StateHardLimit
 }
 
+// AllowRemoteRead returns true if remote read queries are allowed.
 func (m *Manager) AllowRemoteRead() bool {
 	if m == nil {
 		return true
@@ -376,6 +405,7 @@ func (m *Manager) AllowRemoteRead() bool {
 	return LimiterState(m.state.Load()) < StateSoftLimit
 }
 
+// AllowFederation returns true if federation endpoints are allowed.
 func (m *Manager) AllowFederation() bool {
 	if m == nil {
 		return true
@@ -389,6 +419,7 @@ func (m *Manager) AllowFederation() bool {
 	return LimiterState(m.state.Load()) < StateSoftLimit
 }
 
+// AllowBlockCompaction returns true if TSDB block compaction is allowed.
 func (m *Manager) AllowBlockCompaction() bool {
 	if m == nil {
 		return true
@@ -402,6 +433,7 @@ func (m *Manager) AllowBlockCompaction() bool {
 	return LimiterState(m.state.Load()) < StateSoftLimit
 }
 
+// AllowRecordingRules returns true if recording rule evaluation is allowed.
 func (m *Manager) AllowRecordingRules() bool {
 	if m == nil {
 		return true
