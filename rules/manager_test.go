@@ -2875,8 +2875,8 @@ func TestGroup_MemoryLimiterRecordingRuleSkipping(t *testing.T) {
 	// Run single evaluation cycle.
 	group.Eval(context.Background(), time.Now())
 
-	// 1. Verify recording rule was skipped (IterationsMissed incremented, no sample persisted).
-	require.Equal(t, float64(1), testutil.ToFloat64(opts.Metrics.IterationsMissed.WithLabelValues(GroupKey("test_file.yml", "test_group"))))
+	// 1. Verify recording rule was skipped (RulesSkipped incremented, no sample persisted).
+	require.Equal(t, float64(1), testutil.ToFloat64(opts.Metrics.RulesSkipped.WithLabelValues(GroupKey("test_file.yml", "test_group"))))
 
 	// 2. Verify alerting rule in the SAME group was NOT skipped and fired alerts.
 	require.True(t, alertFired.Load(), "Alerting rule should be evaluated even when recording rule is skipped")

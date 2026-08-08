@@ -116,6 +116,7 @@ func NewGroup(o GroupOptions) *Group {
 	metrics.GroupLastRuleDurationSum.WithLabelValues(key)
 	metrics.GroupRules.WithLabelValues(key).Set(float64(len(o.Rules)))
 	metrics.GroupSamples.WithLabelValues(key)
+	metrics.RulesSkipped.WithLabelValues(key)
 	metrics.GroupInterval.WithLabelValues(key).Set(o.Interval.Seconds())
 
 	evalIterationFunc := o.EvalIterationFunc
@@ -530,7 +531,7 @@ func (g *Group) Eval(ctx context.Context, ts time.Time) {
 
 		if _, isAlert := rule.(*AlertingRule); !isAlert {
 			if g.opts.MemoryLimiter != nil && !g.opts.MemoryLimiter.AllowRecordingRules() {
-				g.metrics.IterationsMissed.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
+				g.metrics.RulesSkipped.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
 				return
 			}
 		}
@@ -933,6 +934,7 @@ type Metrics struct {
 	GroupLastRestoreDuration   *prometheus.GaugeVec
 	GroupRules                 *prometheus.GaugeVec
 	GroupSamples               *prometheus.GaugeVec
+	RulesSkipped               *prometheus.CounterVec
 }
 
 // NewGroupMetrics creates a new instance of Metrics and registers it with the provided registerer,
@@ -1058,6 +1060,14 @@ func NewGroupMetrics(reg prometheus.Registerer) *Metrics {
 			},
 			[]string{"rule_group"},
 		),
+		RulesSkipped: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Namespace: namespace,
+				Name:      "rule_evaluations_skipped_total",
+				Help:      "The total number of rule evaluations skipped due to memory limit.",
+			},
+			[]string{"rule_group"},
+		),
 	}
 
 	if reg != nil {
@@ -1077,6 +1087,7 @@ func NewGroupMetrics(reg prometheus.Registerer) *Metrics {
 			m.GroupLastRestoreDuration,
 			m.GroupRules,
 			m.GroupSamples,
+			m.RulesSkipped,
 		)
 	}
 
