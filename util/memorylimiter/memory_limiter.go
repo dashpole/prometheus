@@ -101,20 +101,22 @@ func defaultMetricsReader() MemoryStats {
 	}
 	metrics.Read(samples)
 	var stats MemoryStats
-	if samples[0].Value.Kind() == metrics.KindUint64 {
-		stats.TotalBytes = samples[0].Value.Uint64()
-	}
-	if samples[1].Value.Kind() == metrics.KindUint64 {
-		stats.FreeBytes = samples[1].Value.Uint64()
-	}
-	if samples[2].Value.Kind() == metrics.KindUint64 {
-		stats.ReleasedBytes = samples[2].Value.Uint64()
-	}
-	if samples[3].Value.Kind() == metrics.KindUint64 {
-		stats.GOMEMLIMIT = samples[3].Value.Uint64()
-	}
-	if samples[4].Value.Kind() == metrics.KindUint64 {
-		stats.GCLimiterCycle = samples[4].Value.Uint64()
+	for _, s := range samples {
+		if s.Value.Kind() != metrics.KindUint64 {
+			continue
+		}
+		switch s.Name {
+		case "/memory/classes/total:bytes":
+			stats.TotalBytes = s.Value.Uint64()
+		case "/memory/classes/heap/free:bytes":
+			stats.FreeBytes = s.Value.Uint64()
+		case "/memory/classes/heap/released:bytes":
+			stats.ReleasedBytes = s.Value.Uint64()
+		case "/gc/gomemlimit:bytes":
+			stats.GOMEMLIMIT = s.Value.Uint64()
+		case "/gc/limiter/last-enabled:gc-cycle":
+			stats.GCLimiterCycle = s.Value.Uint64()
+		}
 	}
 	return stats
 }
