@@ -513,6 +513,13 @@ func (g *Group) Eval(ctx context.Context, ts time.Time) {
 		}
 
 		logger := g.logger.With("name", rule.Name(), "index", i)
+		if _, isAlert := rule.(*AlertingRule); !isAlert {
+			if g.opts.MemoryLimiter != nil && !g.opts.MemoryLimiter.AllowRecordingRules() {
+				g.metrics.RulesSkipped.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
+				return
+			}
+		}
+
 		ctx, sp := otel.Tracer("").Start(ctx, "rule")
 		sp.SetAttributes(attribute.String("name", rule.Name()))
 		defer func(t time.Time) {
@@ -527,13 +534,6 @@ func (g *Group) Eval(ctx context.Context, ts time.Time) {
 
 		if sp.SpanContext().IsSampled() && sp.SpanContext().HasTraceID() {
 			logger = logger.With("trace_id", sp.SpanContext().TraceID())
-		}
-
-		if _, isAlert := rule.(*AlertingRule); !isAlert {
-			if g.opts.MemoryLimiter != nil && !g.opts.MemoryLimiter.AllowRecordingRules() {
-				g.metrics.RulesSkipped.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
-				return
-			}
 		}
 
 		g.metrics.EvalTotal.WithLabelValues(GroupKey(g.File(), g.Name())).Inc()
