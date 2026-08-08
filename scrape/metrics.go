@@ -266,7 +266,7 @@ func newScrapeMetrics(reg prometheus.Registerer) (*scrapeMetrics, error) {
 
 	sm.targetScrapesSkipped = prometheus.NewCounter(
 		prometheus.CounterOpts{
-			Name: "prometheus_target_scrapes_skipped_total",
+			Name: "prometheus_target_scrapes_exceeded_memory_limit_total",
 			Help: "Total number of target scrapes skipped due to memory limits.",
 		},
 	)
