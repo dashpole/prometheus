@@ -766,12 +766,12 @@ type MemoryLimiterConfig struct {
 
 // MemoryLimiterEnforcement configures which mitigations are enabled.
 type MemoryLimiterEnforcement struct {
-	// Soft Limit mitigations
+	// Soft Limit mitigations.
 	PauseBlockCompaction bool `yaml:"pause_block_compaction,omitempty"`
 	RejectRemoteRead     bool `yaml:"reject_remote_read,omitempty"`
 	RejectFederation     bool `yaml:"reject_federation,omitempty"`
 
-	// Hard Limit mitigations
+	// Hard Limit mitigations.
 	FailScrapes         bool `yaml:"fail_scrapes,omitempty"`
 	RejectOTLP          bool `yaml:"reject_otlp,omitempty"`
 	RejectRemoteWrite   bool `yaml:"reject_remote_write,omitempty"`
