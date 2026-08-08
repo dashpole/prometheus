@@ -193,7 +193,8 @@ var (
 
 	DefaultRuntimeConfig = RuntimeConfig{
 		// Go runtime tuning.
-		GoGC: getGoGC(),
+		GoGC:          getGoGC(),
+		MemoryLimiter: DefaultMemoryLimiterConfig,
 	}
 
 	DefaultMemoryLimiterConfig = MemoryLimiterConfig{
