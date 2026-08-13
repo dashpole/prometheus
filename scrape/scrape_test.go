@@ -7979,7 +7979,6 @@ func (m *mockMemoryLimiter) AllowOTLP() bool                             { retur
 func (m *mockMemoryLimiter) AllowRemoteWrite() bool                      { return m.allowScrape }
 func (m *mockMemoryLimiter) AllowRemoteRead() bool                       { return m.allowScrape }
 func (m *mockMemoryLimiter) AllowFederation() bool                       { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowBlockCompaction() bool                  { return m.allowScrape }
 func (m *mockMemoryLimiter) AllowRecordingRules() bool                   { return m.allowScrape }
 func (*mockMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
 func (*mockMemoryLimiter) Start(context.Context)                         {}

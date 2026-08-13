@@ -43,13 +43,12 @@ func TestMemoryLimiterStateTransitions(t *testing.T) {
 		SoftLimitRatio: 0.70,
 		HardLimitRatio: 0.85,
 		Enforcement: config.MemoryLimiterEnforcement{
-			PauseBlockCompaction: true,
-			RejectRemoteRead:     true,
-			RejectFederation:     true,
-			FailScrapes:          true,
-			RejectOTLP:           true,
-			RejectRemoteWrite:    true,
-			PauseRecordingRules:  true,
+			RejectRemoteRead:    true,
+			RejectFederation:    true,
+			FailScrapes:         true,
+			RejectOTLP:          true,
+			RejectRemoteWrite:   true,
+			PauseRecordingRules: true,
 		},
 	}
 
@@ -71,7 +70,6 @@ func TestMemoryLimiterStateTransitions(t *testing.T) {
 	require.True(t, mgr.AllowRemoteWrite())
 	require.True(t, mgr.AllowRemoteRead())
 	require.True(t, mgr.AllowFederation())
-	require.True(t, mgr.AllowBlockCompaction())
 	require.True(t, mgr.AllowRecordingRules())
 
 	// 2. Soft limit state: 750 MB in-use (75% ratio >= 70%, < 85%)
@@ -84,7 +82,6 @@ func TestMemoryLimiterStateTransitions(t *testing.T) {
 	require.True(t, mgr.AllowRemoteWrite())
 	require.False(t, mgr.AllowRemoteRead())
 	require.False(t, mgr.AllowFederation())
-	require.False(t, mgr.AllowBlockCompaction())
 	require.True(t, mgr.AllowRecordingRules())
 
 	// 3. Hard limit state: 900 MB in-use (90% ratio >= 85%)
@@ -97,7 +94,6 @@ func TestMemoryLimiterStateTransitions(t *testing.T) {
 	require.False(t, mgr.AllowRemoteWrite())
 	require.False(t, mgr.AllowRemoteRead())
 	require.False(t, mgr.AllowFederation())
-	require.False(t, mgr.AllowBlockCompaction())
 	require.False(t, mgr.AllowRecordingRules())
 
 	// 4. Memory drops back to 400 MB (40% < 70%) -> Clean recovery to StateOK
@@ -106,7 +102,6 @@ func TestMemoryLimiterStateTransitions(t *testing.T) {
 	mgr.Evaluate()
 	require.Equal(t, StateOK, mgr.State())
 	require.True(t, mgr.AllowScrape())
-	require.True(t, mgr.AllowBlockCompaction())
 }
 
 func TestGCLimiterEscalation(t *testing.T) {

@@ -2823,7 +2823,6 @@ func (*mockRuleMemoryLimiter) AllowOTLP() bool                               { r
 func (*mockRuleMemoryLimiter) AllowRemoteWrite() bool                        { return true }
 func (*mockRuleMemoryLimiter) AllowRemoteRead() bool                         { return true }
 func (*mockRuleMemoryLimiter) AllowFederation() bool                         { return true }
-func (*mockRuleMemoryLimiter) AllowBlockCompaction() bool                    { return true }
 func (m *mockRuleMemoryLimiter) AllowRecordingRules() bool                   { return m.allowRecordingRules }
 func (*mockRuleMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
 func (*mockRuleMemoryLimiter) Start(context.Context)                         {}

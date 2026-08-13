@@ -68,8 +68,6 @@ type MemoryLimiter interface {
 	AllowRemoteRead() bool
 	// AllowFederation returns true if federation requests are allowed.
 	AllowFederation() bool
-	// AllowBlockCompaction returns true if block compaction is allowed.
-	AllowBlockCompaction() bool
 	// AllowRecordingRules returns true if recording rules evaluation is allowed.
 	AllowRecordingRules() bool
 	// ApplyConfig updates the memory limiter configuration.
@@ -422,20 +420,6 @@ func (m *Manager) AllowFederation() bool {
 	cfg := m.config
 	m.mu.RUnlock()
 	if cfg == nil || !cfg.Enforcement.RejectFederation {
-		return true
-	}
-	return LimiterState(m.state.Load()) < StateSoftLimit
-}
-
-// AllowBlockCompaction returns true if TSDB block compaction is allowed.
-func (m *Manager) AllowBlockCompaction() bool {
-	if m == nil {
-		return true
-	}
-	m.mu.RLock()
-	cfg := m.config
-	m.mu.RUnlock()
-	if cfg == nil || !cfg.Enforcement.PauseBlockCompaction {
 		return true
 	}
 	return LimiterState(m.state.Load()) < StateSoftLimit

@@ -205,13 +205,12 @@ var (
 	}
 
 	DefaultMemoryLimiterEnforcement = MemoryLimiterEnforcement{
-		PauseBlockCompaction: true,
-		RejectRemoteRead:     true,
-		RejectFederation:     true,
-		FailScrapes:          true,
-		RejectOTLP:           true,
-		RejectRemoteWrite:    true,
-		PauseRecordingRules:  true,
+		RejectRemoteRead:    true,
+		RejectFederation:    true,
+		FailScrapes:         true,
+		RejectOTLP:          true,
+		RejectRemoteWrite:   true,
+		PauseRecordingRules: true,
 	}
 
 	// DefaultScrapeConfig is the default scrape configuration. Users of this
@@ -767,9 +766,8 @@ type MemoryLimiterConfig struct {
 // MemoryLimiterEnforcement configures which mitigations are enabled.
 type MemoryLimiterEnforcement struct {
 	// Soft Limit mitigations.
-	PauseBlockCompaction bool `yaml:"pause_block_compaction,omitempty"`
-	RejectRemoteRead     bool `yaml:"reject_remote_read,omitempty"`
-	RejectFederation     bool `yaml:"reject_federation,omitempty"`
+	RejectRemoteRead bool `yaml:"reject_remote_read,omitempty"`
+	RejectFederation bool `yaml:"reject_federation,omitempty"`
 
 	// Hard Limit mitigations.
 	FailScrapes         bool `yaml:"fail_scrapes,omitempty"`
@@ -785,7 +783,7 @@ func (c *MemoryLimiterConfig) isZero() bool {
 
 // isZero returns true iff the enforcement config is the zero value.
 func (e *MemoryLimiterEnforcement) isZero() bool {
-	return !e.PauseBlockCompaction && !e.RejectRemoteRead && !e.RejectFederation &&
+	return !e.RejectRemoteRead && !e.RejectFederation &&
 		!e.FailScrapes && !e.RejectOTLP && !e.RejectRemoteWrite && !e.PauseRecordingRules
 }
 
