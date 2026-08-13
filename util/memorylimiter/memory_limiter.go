@@ -208,9 +208,9 @@ func (m *Manager) Start(ctx context.Context) {
 	loopCtx, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	m.lastCheckTime = m.now()
+	m.wg.Add(1)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	go m.run(loopCtx)
 }
 
