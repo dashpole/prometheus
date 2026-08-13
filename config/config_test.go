@@ -3643,6 +3643,15 @@ hard_limit_ratio: 0.8
 `,
 			expectError: true,
 		},
+		{
+			name: "zero initialized check_interval",
+			yamlStr: `
+check_interval: 0s
+soft_limit_ratio: 0.8
+hard_limit_ratio: 0.9
+`,
+			expectError: true,
+		},
 	}
 
 	for _, tc := range tests {

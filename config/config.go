@@ -791,9 +791,6 @@ func (e *MemoryLimiterEnforcement) isZero() bool {
 
 // Validate validates the memory limiter configuration.
 func (c *MemoryLimiterConfig) Validate() error {
-	if c.isZero() {
-		return nil
-	}
 	if c.CheckInterval <= 0 {
 		return errors.New("memory_limiter check_interval must be greater than 0")
 	}
