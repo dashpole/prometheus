@@ -147,6 +147,12 @@ type Manager struct {
 
 // NewManager initializes and returns a new Manager.
 func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg prometheus.Registerer) (*Manager, error) {
+	if cfg != nil {
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid memory limiter config: %w", err)
+		}
+	}
+
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -158,12 +164,6 @@ func NewManager(cfg *config.MemoryLimiterConfig, logger *slog.Logger, reg promet
 		now:           time.Now,
 		metrics:       newMemoryLimiterMetrics(reg),
 		reloadCh:      make(chan struct{}, 1),
-	}
-
-	if cfg != nil {
-		if err := cfg.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid memory limiter config: %w", err)
-		}
 	}
 
 	return m, nil
