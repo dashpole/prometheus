@@ -20,10 +20,11 @@ import (
 	"math"
 	"runtime/metrics"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/atomic"
+
 	"github.com/prometheus/prometheus/config"
 )
 
@@ -300,9 +301,10 @@ func (m *Manager) Evaluate() {
 
 	oldState := LimiterState(m.state.Load())
 	if elapsed > 0 {
-		if oldState == StateSoftLimit {
+		switch oldState {
+		case StateSoftLimit:
 			m.metrics.engagedSecondsTotal.WithLabelValues("soft").Add(elapsed)
-		} else if oldState == StateHardLimit {
+		case StateHardLimit:
 			m.metrics.engagedSecondsTotal.WithLabelValues("hard").Add(elapsed)
 		}
 	}
@@ -314,11 +316,12 @@ func (m *Manager) Evaluate() {
 	m.gcLimiterInitialized = true
 
 	var newState LimiterState
-	if pressureRatio >= m.config.HardLimitRatio || gcLimiterActive {
+	switch {
+	case pressureRatio >= m.config.HardLimitRatio || gcLimiterActive:
 		newState = StateHardLimit
-	} else if pressureRatio >= m.config.SoftLimitRatio {
+	case pressureRatio >= m.config.SoftLimitRatio:
 		newState = StateSoftLimit
-	} else {
+	default:
 		newState = StateOK
 	}
 
@@ -336,13 +339,14 @@ func (m *Manager) Evaluate() {
 	}
 
 	// Update gauges.
-	if newState == StateHardLimit {
+	switch newState {
+	case StateHardLimit:
 		m.metrics.active.WithLabelValues("hard").Set(1)
 		m.metrics.active.WithLabelValues("soft").Set(1)
-	} else if newState == StateSoftLimit {
+	case StateSoftLimit:
 		m.metrics.active.WithLabelValues("hard").Set(0)
 		m.metrics.active.WithLabelValues("soft").Set(1)
-	} else {
+	default:
 		m.metrics.active.WithLabelValues("hard").Set(0)
 		m.metrics.active.WithLabelValues("soft").Set(0)
 	}

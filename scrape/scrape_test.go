@@ -7974,16 +7974,16 @@ func (m *mockMemoryLimiter) State() memorylimiter.LimiterState {
 	}
 	return memorylimiter.StateHardLimit
 }
-func (m *mockMemoryLimiter) AllowScrape() bool                               { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowOTLP() bool                                 { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowRemoteWrite() bool                          { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowRemoteRead() bool                           { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowFederation() bool                           { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowBlockCompaction() bool                      { return m.allowScrape }
-func (m *mockMemoryLimiter) AllowRecordingRules() bool                      { return m.allowScrape }
-func (m *mockMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
-func (m *mockMemoryLimiter) Start(context.Context)                           {}
-func (m *mockMemoryLimiter) Stop()                                           {}
+func (m *mockMemoryLimiter) AllowScrape() bool                           { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowOTLP() bool                             { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRemoteWrite() bool                      { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRemoteRead() bool                       { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowFederation() bool                       { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowBlockCompaction() bool                  { return m.allowScrape }
+func (m *mockMemoryLimiter) AllowRecordingRules() bool                   { return m.allowScrape }
+func (*mockMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
+func (*mockMemoryLimiter) Start(context.Context)                         {}
+func (*mockMemoryLimiter) Stop()                                         {}
 
 func TestScrapeLoop_MemoryLimiterAbort(t *testing.T) {
 	for _, appV2 := range []bool{false, true} {

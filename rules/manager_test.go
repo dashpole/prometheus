@@ -2815,30 +2815,30 @@ type mockRuleMemoryLimiter struct {
 	allowRecordingRules bool
 }
 
-func (m *mockRuleMemoryLimiter) State() memorylimiter.LimiterState {
+func (*mockRuleMemoryLimiter) State() memorylimiter.LimiterState {
 	return memorylimiter.StateHardLimit
 }
-func (m *mockRuleMemoryLimiter) AllowScrape() bool                               { return true }
-func (m *mockRuleMemoryLimiter) AllowOTLP() bool                                 { return true }
-func (m *mockRuleMemoryLimiter) AllowRemoteWrite() bool                          { return true }
-func (m *mockRuleMemoryLimiter) AllowRemoteRead() bool                           { return true }
-func (m *mockRuleMemoryLimiter) AllowFederation() bool                           { return true }
-func (m *mockRuleMemoryLimiter) AllowBlockCompaction() bool                      { return true }
-func (m *mockRuleMemoryLimiter) AllowRecordingRules() bool                      { return m.allowRecordingRules }
-func (m *mockRuleMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
-func (m *mockRuleMemoryLimiter) Start(context.Context)                           {}
-func (m *mockRuleMemoryLimiter) Stop()                                           {}
+func (*mockRuleMemoryLimiter) AllowScrape() bool                             { return true }
+func (*mockRuleMemoryLimiter) AllowOTLP() bool                               { return true }
+func (*mockRuleMemoryLimiter) AllowRemoteWrite() bool                        { return true }
+func (*mockRuleMemoryLimiter) AllowRemoteRead() bool                         { return true }
+func (*mockRuleMemoryLimiter) AllowFederation() bool                         { return true }
+func (*mockRuleMemoryLimiter) AllowBlockCompaction() bool                    { return true }
+func (m *mockRuleMemoryLimiter) AllowRecordingRules() bool                   { return m.allowRecordingRules }
+func (*mockRuleMemoryLimiter) ApplyConfig(*config.MemoryLimiterConfig) error { return nil }
+func (*mockRuleMemoryLimiter) Start(context.Context)                         {}
+func (*mockRuleMemoryLimiter) Stop()                                         {}
 
 func TestGroup_MemoryLimiterRecordingRuleSkipping(t *testing.T) {
 	storage := teststorage.New(t)
 	defer storage.Close()
 
 	var alertFired atomic.Bool
-	notifyFunc := func(ctx context.Context, expr string, alerts ...*Alert) {
+	notifyFunc := func(_ context.Context, _ string, _ ...*Alert) {
 		alertFired.Store(true)
 	}
 
-	queryFunc := func(ctx context.Context, q string, ts time.Time) (promql.Vector, error) {
+	queryFunc := func(_ context.Context, _ string, ts time.Time) (promql.Vector, error) {
 		return promql.Vector{
 			promql.Sample{
 				Metric: labels.FromStrings("__name__", "up", "job", "test"),
