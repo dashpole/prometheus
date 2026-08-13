@@ -176,6 +176,7 @@ type Options struct {
 	// initialized immediately upon startup. It also prevents capturing
 	// intermediate state (such as applications crashing shortly after booting),
 	// and ensures backend rate limits don't drop valuable shutdown scrapes
+	// because of an early startup scrape.
 	InitialScrapeOffset time.Duration
 
 	// Optional memory limiter to abort scrapes under memory pressure.
