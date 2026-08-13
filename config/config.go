@@ -793,10 +793,10 @@ func (c *MemoryLimiterConfig) Validate() error {
 		return errors.New("memory_limiter check_interval must be greater than 0")
 	}
 	if c.SoftLimitRatio <= 0 || c.SoftLimitRatio > 1.0 {
-		return fmt.Errorf("memory_limiter soft_limit_ratio must be between 0 and 1 (exclusive), got %f", c.SoftLimitRatio)
+		return fmt.Errorf("memory_limiter soft_limit_ratio must be between 0 and 1 (inclusive), got %f", c.SoftLimitRatio)
 	}
 	if c.HardLimitRatio <= 0 || c.HardLimitRatio > 1.0 {
-		return fmt.Errorf("memory_limiter hard_limit_ratio must be between 0 and 1 (exclusive), got %f", c.HardLimitRatio)
+		return fmt.Errorf("memory_limiter hard_limit_ratio must be between 0 and 1 (inclusive), got %f", c.HardLimitRatio)
 	}
 	if c.SoftLimitRatio > c.HardLimitRatio {
 		return fmt.Errorf("memory_limiter soft_limit_ratio (%f) cannot be greater than hard_limit_ratio (%f)", c.SoftLimitRatio, c.HardLimitRatio)
