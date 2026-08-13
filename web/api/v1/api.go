@@ -2125,12 +2125,7 @@ func (api *API) remoteWrite(w http.ResponseWriter, r *http.Request) {
 func (api *API) otlpWrite(w http.ResponseWriter, r *http.Request) {
 	if api.memoryLimiter != nil && !api.memoryLimiter.AllowOTLP() {
 		w.Header().Set("Retry-After", "5")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"code":    14,
-			"message": "Service Unavailable: Memory limit exceeded",
-		})
+		http.Error(w, "Service Unavailable: Memory limit exceeded", http.StatusServiceUnavailable)
 		return
 	}
 	if api.otlpWriteHandler != nil {
