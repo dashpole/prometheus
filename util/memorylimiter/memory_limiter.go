@@ -305,6 +305,7 @@ func (m *Manager) Evaluate() {
 		case StateSoftLimit:
 			m.metrics.engagedSecondsTotal.WithLabelValues("soft").Add(elapsed)
 		case StateHardLimit:
+			m.metrics.engagedSecondsTotal.WithLabelValues("soft").Add(elapsed)
 			m.metrics.engagedSecondsTotal.WithLabelValues("hard").Add(elapsed)
 		}
 	}
