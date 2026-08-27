@@ -467,23 +467,26 @@ func (d *Decoder) samplesV2WithExemplars(dec *encoding.Decbuf, samples []RefSamp
 	if dec.Len() == 0 {
 		return samples, nil
 	}
-	if minSize := dec.Len() / (1 + 1 + 8); cap(samples) < minSize {
-		samples = make([]RefSampleV2, 0, minSize)
+	if minSize := len(samples) + dec.Len()/(1+1+8); cap(samples) < minSize {
+		newSamples := make([]RefSampleV2, len(samples), minSize)
+		copy(newSamples, samples)
+		samples = newSamples
 	}
 	var firstT, firstST int64
+	var prev RefSampleV2
+	hasPrev := false
 	for len(dec.B) > 0 && dec.Err() == nil {
-		var prev RefSampleV2
 		var ref, t, st int64
 		var val uint64
 
-		if len(samples) == 0 {
+		if !hasPrev {
 			ref = dec.Varint64()
 			firstT = dec.Varint64()
 			t = firstT
 			st = dec.Varint64()
 			firstST = st
+			hasPrev = true
 		} else {
-			prev = samples[len(samples)-1]
 			ref = int64(prev.Ref) + dec.Varint64()
 			t = firstT + dec.Varint64()
 			st = readSTMarker(dec, prev.ST, firstST)
@@ -513,6 +516,7 @@ func (d *Decoder) samplesV2WithExemplars(dec *encoding.Decbuf, samples []RefSamp
 			}
 		}
 
+		prev = s
 		samples = append(samples, s)
 	}
 
@@ -532,40 +536,46 @@ func (*Decoder) samplesV2(dec *encoding.Decbuf, samples []RefSample) ([]RefSampl
 		return samples, nil
 	}
 	// Allow 1 byte for each varint and 8 for the value; the output slice must be at least that big.
-	if minSize := dec.Len() / (1 + 1 + 8); cap(samples) < minSize {
-		samples = make([]RefSample, 0, minSize)
+	if minSize := len(samples) + dec.Len()/(1+1+8); cap(samples) < minSize {
+		newSamples := make([]RefSample, len(samples), minSize)
+		copy(newSamples, samples)
+		samples = newSamples
 	}
 	var firstT, firstST int64
+	var prev RefSample
+	hasPrev := false
 	for len(dec.B) > 0 && dec.Err() == nil {
-		var prev RefSample
 		var ref, t, st int64
 		var val uint64
 
-		if len(samples) == 0 {
+		if !hasPrev {
 			ref = dec.Varint64()
 			firstT = dec.Varint64()
 			t = firstT
 			st = dec.Varint64()
 			firstST = st
+			hasPrev = true
 		} else {
-			prev = samples[len(samples)-1]
 			ref = int64(prev.Ref) + dec.Varint64()
 			t = firstT + dec.Varint64()
 			st = readSTMarker(dec, prev.ST, firstST)
 		}
 
 		val = dec.Be64()
-		samples = append(samples, RefSample{
+		s := RefSample{
 			Ref: chunks.HeadSeriesRef(ref),
 			ST:  st,
 			T:   t,
 			V:   math.Float64frombits(val),
-		})
+		}
 
 		numEx := dec.Uvarint()
 		if numEx > 0 {
 			skipExemplars(dec, numEx)
 		}
+
+		prev = s
+		samples = append(samples, s)
 	}
 
 	if dec.Err() != nil {

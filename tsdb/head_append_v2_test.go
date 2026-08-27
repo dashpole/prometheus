@@ -5467,5 +5467,25 @@ func TestHead_MixedVersionWALReplay(t *testing.T) {
 	require.Equal(t, int64(2000), t4)
 	require.Equal(t, 200.0, v4)
 	require.Equal(t, chunkenc.ValNone, it2.Next())
+
+	// Verify exemplars from both V1 and V2 records are restored to ExemplarStorage
+	exQuerier, err := h.ExemplarQuerier(context.Background())
+	require.NoError(t, err)
+
+	// V1 exemplar recovery
+	res1, err := exQuerier.Select(0, 3000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "v1_series")})
+	require.NoError(t, err)
+	require.Len(t, res1, 1)
+	require.Len(t, res1[0].Exemplars, 1)
+	require.Equal(t, "v1_trace", res1[0].Exemplars[0].Labels.Get("trace_id"))
+	require.Equal(t, 10.0, res1[0].Exemplars[0].Value)
+
+	// V2 compound exemplar recovery
+	res2, err := exQuerier.Select(0, 3000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "v2_series")})
+	require.NoError(t, err)
+	require.Len(t, res2, 1)
+	require.Len(t, res2[0].Exemplars, 1)
+	require.Equal(t, "v2_trace", res2[0].Exemplars[0].Labels.Get("trace_id"))
+	require.Equal(t, 100.0, res2[0].Exemplars[0].Value)
 }
 

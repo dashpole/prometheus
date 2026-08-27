@@ -958,6 +958,7 @@ func TestRun_AvoidNotifyWhenBehind(t *testing.T) {
 func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 	// Test case 1: sendExemplars = true -> captures attached exemplars in AppendSamplesV2
 	t.Run("sendExemplars=true", func(t *testing.T) {
+		overwriteReadTimeout(t, 20*time.Millisecond)
 		now := time.Now()
 		ts := timestamp.FromTime(now.Add(1 * time.Second))
 		dir := t.TempDir()
@@ -971,7 +972,8 @@ func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 		})
 
 		wt := newWriteToMock(0)
-		watcher := NewWatcher(wMetrics, nil, nil, "test", wt, dir, true, true, false, nil)
+		metrics := NewWatcherMetrics(prometheus.NewRegistry())
+		watcher := NewWatcher(metrics, nil, nil, "test", wt, dir, true, true, false, nil)
 		watcher.SetStartTime(now)
 		watcher.Start()
 		t.Cleanup(watcher.Stop)
@@ -998,6 +1000,7 @@ func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 		watcher.Notify()
 
 		require.Eventually(t, func() bool {
+			watcher.Notify()
 			wt.mu.Lock()
 			defer wt.mu.Unlock()
 			return len(wt.samplesAppended) >= 1 && len(wt.exemplarsAppended) >= 1
@@ -1012,6 +1015,7 @@ func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 
 	// Test case 2: sendExemplars = false -> strips exemplars, calls Append
 	t.Run("sendExemplars=false", func(t *testing.T) {
+		overwriteReadTimeout(t, 20*time.Millisecond)
 		now := time.Now()
 		ts := timestamp.FromTime(now.Add(1 * time.Second))
 		dir := t.TempDir()
@@ -1025,7 +1029,8 @@ func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 		})
 
 		wt := newWriteToMock(0)
-		watcher := NewWatcher(wMetrics, nil, nil, "test", wt, dir, false, false, false, nil)
+		metrics := NewWatcherMetrics(prometheus.NewRegistry())
+		watcher := NewWatcher(metrics, nil, nil, "test", wt, dir, false, false, false, nil)
 		watcher.SetStartTime(now)
 		watcher.Start()
 		t.Cleanup(watcher.Stop)
@@ -1050,6 +1055,7 @@ func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
 		watcher.Notify()
 
 		require.Eventually(t, func() bool {
+			watcher.Notify()
 			wt.mu.Lock()
 			defer wt.mu.Unlock()
 			return len(wt.samplesAppended) >= 1

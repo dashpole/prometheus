@@ -173,17 +173,47 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 				}
 				decoded <- series
 			case record.Samples, record.SamplesV2:
-				samples := h.wlReplaySamplesPool.Get()[:0]
-				samples, err = dec.Samples(r.Record(), samples)
-				if err != nil {
-					decodeErr = &wlog.CorruptionErr{
-						Err:     fmt.Errorf("decode samples: %w", err),
-						Segment: r.Segment(),
-						Offset:  r.Offset(),
+				rec := r.Record()
+				if h.opts.EnableExemplarStorage && dec.Type(rec) == record.SamplesV2 {
+					samplesV2, err := dec.SamplesV2(rec, nil)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode samples: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
 					}
-					return
+					samples := h.wlReplaySamplesPool.Get()[:0]
+					var exemplars []record.RefExemplar
+					for _, s := range samplesV2 {
+						samples = append(samples, record.RefSample{
+							Ref: s.Ref,
+							ST:  s.ST,
+							T:   s.T,
+							V:   s.V,
+						})
+						if len(s.Exemplars) > 0 {
+							exemplars = append(exemplars, s.Exemplars...)
+						}
+					}
+					decoded <- samples
+					if len(exemplars) > 0 {
+						decoded <- exemplars
+					}
+				} else {
+					samples := h.wlReplaySamplesPool.Get()[:0]
+					samples, err = dec.Samples(rec, samples)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode samples: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
+					}
+					decoded <- samples
 				}
-				decoded <- samples
 			case record.Tombstones:
 				tstones := h.wlReplaytStonesPool.Get()[:0]
 				tstones, err = dec.Tombstones(r.Record(), tstones)
@@ -209,29 +239,89 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 				}
 				decoded <- exemplars
 			case record.HistogramSamples, record.CustomBucketsHistogramSamples, record.HistogramSamplesV2:
-				hists := h.wlReplayHistogramsPool.Get()[:0]
-				hists, err = dec.HistogramSamples(r.Record(), hists)
-				if err != nil {
-					decodeErr = &wlog.CorruptionErr{
-						Err:     fmt.Errorf("decode histograms: %w", err),
-						Segment: r.Segment(),
-						Offset:  r.Offset(),
+				rec := r.Record()
+				if h.opts.EnableExemplarStorage && dec.Type(rec) == record.HistogramSamplesV2 {
+					histsV2, err := dec.HistogramSamplesV2(rec, nil)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode histograms: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
 					}
-					return
+					hists := h.wlReplayHistogramsPool.Get()[:0]
+					var exemplars []record.RefExemplar
+					for _, hs := range histsV2 {
+						hists = append(hists, record.RefHistogramSample{
+							Ref: hs.Ref,
+							ST:  hs.ST,
+							T:   hs.T,
+							H:   hs.H,
+						})
+						if len(hs.Exemplars) > 0 {
+							exemplars = append(exemplars, hs.Exemplars...)
+						}
+					}
+					decoded <- hists
+					if len(exemplars) > 0 {
+						decoded <- exemplars
+					}
+				} else {
+					hists := h.wlReplayHistogramsPool.Get()[:0]
+					hists, err = dec.HistogramSamples(rec, hists)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode histograms: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
+					}
+					decoded <- hists
 				}
-				decoded <- hists
 			case record.FloatHistogramSamples, record.CustomBucketsFloatHistogramSamples, record.FloatHistogramSamplesV2:
-				hists := h.wlReplayFloatHistogramsPool.Get()[:0]
-				hists, err = dec.FloatHistogramSamples(r.Record(), hists)
-				if err != nil {
-					decodeErr = &wlog.CorruptionErr{
-						Err:     fmt.Errorf("decode float histograms: %w", err),
-						Segment: r.Segment(),
-						Offset:  r.Offset(),
+				rec := r.Record()
+				if h.opts.EnableExemplarStorage && dec.Type(rec) == record.FloatHistogramSamplesV2 {
+					fhistsV2, err := dec.FloatHistogramSamplesV2(rec, nil)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode float histograms: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
 					}
-					return
+					fhists := h.wlReplayFloatHistogramsPool.Get()[:0]
+					var exemplars []record.RefExemplar
+					for _, fhs := range fhistsV2 {
+						fhists = append(fhists, record.RefFloatHistogramSample{
+							Ref: fhs.Ref,
+							ST:  fhs.ST,
+							T:   fhs.T,
+							FH:  fhs.FH,
+						})
+						if len(fhs.Exemplars) > 0 {
+							exemplars = append(exemplars, fhs.Exemplars...)
+						}
+					}
+					decoded <- fhists
+					if len(exemplars) > 0 {
+						decoded <- exemplars
+					}
+				} else {
+					fhists := h.wlReplayFloatHistogramsPool.Get()[:0]
+					fhists, err = dec.FloatHistogramSamples(rec, fhists)
+					if err != nil {
+						decodeErr = &wlog.CorruptionErr{
+							Err:     fmt.Errorf("decode float histograms: %w", err),
+							Segment: r.Segment(),
+							Offset:  r.Offset(),
+						}
+						return
+					}
+					decoded <- fhists
 				}
-				decoded <- hists
 			case record.Metadata:
 				meta := h.wlReplayMetadataPool.Get()[:0]
 				meta, err := dec.Metadata(r.Record(), meta)

@@ -518,9 +518,12 @@ func (w *Watcher) garbageCollectSeries(segmentNum int) error {
 func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 	series := w.recordBuf.GetRefSeries(512)
 	samples := w.recordBuf.GetSamples(512)
+	samplesV2 := make([]record.RefSampleV2, 0, 512)
 	exemplars := w.recordBuf.GetExemplars(512)
 	histograms := w.recordBuf.GetHistograms(512)
+	histogramsV2 := make([]record.RefHistogramSampleV2, 0, 512)
 	floatHistograms := w.recordBuf.GetFloatHistograms(512)
+	floatHistogramsV2 := make([]record.RefFloatHistogramSampleV2, 0, 512)
 	metadata := w.recordBuf.GetMetadata(512)
 	defer func() {
 		w.recordBuf.PutRefSeries(series)
@@ -553,12 +556,12 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 				break
 			}
 			if w.sendExemplars {
-				samplesV2, err := dec.SamplesV2(rec, nil)
+				samplesV2, err = dec.SamplesV2(rec, samplesV2[:0])
 				if err != nil {
 					w.recordDecodeFailsMetric.Inc()
 					return err
 				}
-				samplesToSend := make([]record.RefSampleV2, 0, len(samplesV2))
+				samplesToSend := samplesV2[:0]
 				for _, s := range samplesV2 {
 					if s.T > w.startTimestamp {
 						if !w.sendSamples {
@@ -622,12 +625,12 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 				break
 			}
 			if w.sendExemplars {
-				histogramsV2, err := dec.HistogramSamplesV2(rec, nil)
+				histogramsV2, err = dec.HistogramSamplesV2(rec, histogramsV2[:0])
 				if err != nil {
 					w.recordDecodeFailsMetric.Inc()
 					return err
 				}
-				histogramsToSend := make([]record.RefHistogramSampleV2, 0, len(histogramsV2))
+				histogramsToSend := histogramsV2[:0]
 				for _, h := range histogramsV2 {
 					if h.T > w.startTimestamp {
 						if !w.sendSamples {
@@ -674,12 +677,12 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 				break
 			}
 			if w.sendExemplars {
-				floatHistogramsV2, err := dec.FloatHistogramSamplesV2(rec, nil)
+				floatHistogramsV2, err = dec.FloatHistogramSamplesV2(rec, floatHistogramsV2[:0])
 				if err != nil {
 					w.recordDecodeFailsMetric.Inc()
 					return err
 				}
-				floatHistogramsToSend := make([]record.RefFloatHistogramSampleV2, 0, len(floatHistogramsV2))
+				floatHistogramsToSend := floatHistogramsV2[:0]
 				for _, fh := range floatHistogramsV2 {
 					if fh.T > w.startTimestamp {
 						if !w.sendSamples {
