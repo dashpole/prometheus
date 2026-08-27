@@ -22,7 +22,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -3942,25 +3941,50 @@ func TestWALSampleAndExemplarOrder_AppenderV2(t *testing.T) {
 	lbls := labels.FromStrings("foo", "bar")
 	testcases := map[string]struct {
 		appendF      func(app storage.AppenderV2, ts int64) (storage.SeriesRef, error)
-		expectedType reflect.Type
+		expectedType record.Type
+		verifyEx     func(t *testing.T, dec record.Decoder, rec []byte)
 	}{
 		"float sample": {
 			appendF: func(app storage.AppenderV2, ts int64) (storage.SeriesRef, error) {
 				return app.Append(0, lbls, 0, ts, 1.0, nil, nil, storage.AOptions{Exemplars: []exemplar.Exemplar{{Value: 1.0, Ts: 5}}})
 			},
-			expectedType: reflect.TypeFor[[]record.RefSample](),
+			expectedType: record.SamplesV2,
+			verifyEx: func(t *testing.T, dec record.Decoder, rec []byte) {
+				samples, err := dec.SamplesV2(rec, nil)
+				require.NoError(t, err)
+				require.Len(t, samples, 1)
+				require.Len(t, samples[0].Exemplars, 1)
+				require.Equal(t, 1.0, samples[0].Exemplars[0].V)
+				require.Equal(t, int64(5), samples[0].Exemplars[0].T)
+			},
 		},
 		"histogram sample": {
 			appendF: func(app storage.AppenderV2, ts int64) (storage.SeriesRef, error) {
 				return app.Append(0, lbls, 0, ts, 0, tsdbutil.GenerateTestHistogram(1), nil, storage.AOptions{Exemplars: []exemplar.Exemplar{{Value: 1.0, Ts: 5}}})
 			},
-			expectedType: reflect.TypeFor[[]record.RefHistogramSample](),
+			expectedType: record.HistogramSamplesV2,
+			verifyEx: func(t *testing.T, dec record.Decoder, rec []byte) {
+				samples, err := dec.HistogramSamplesV2(rec, nil)
+				require.NoError(t, err)
+				require.Len(t, samples, 1)
+				require.Len(t, samples[0].Exemplars, 1)
+				require.Equal(t, 1.0, samples[0].Exemplars[0].V)
+				require.Equal(t, int64(5), samples[0].Exemplars[0].T)
+			},
 		},
 		"float histogram sample": {
 			appendF: func(app storage.AppenderV2, ts int64) (storage.SeriesRef, error) {
 				return app.Append(0, lbls, 0, ts, 0, nil, tsdbutil.GenerateTestFloatHistogram(1), storage.AOptions{Exemplars: []exemplar.Exemplar{{Value: 1.0, Ts: 5}}})
 			},
-			expectedType: reflect.TypeFor[[]record.RefFloatHistogramSample](),
+			expectedType: record.FloatHistogramSamplesV2,
+			verifyEx: func(t *testing.T, dec record.Decoder, rec []byte) {
+				samples, err := dec.FloatHistogramSamplesV2(rec, nil)
+				require.NoError(t, err)
+				require.Len(t, samples, 1)
+				require.Len(t, samples[0].Exemplars, 1)
+				require.Equal(t, 1.0, samples[0].Exemplars[0].V)
+				require.Equal(t, int64(5), samples[0].Exemplars[0].T)
+			},
 		},
 	}
 
@@ -3977,14 +4001,25 @@ func TestWALSampleAndExemplarOrder_AppenderV2(t *testing.T) {
 
 			require.NoError(t, app.Commit())
 
-			recs := readTestWAL(t, w.Dir())
-			require.Len(t, recs, 3)
-			_, ok := recs[0].([]record.RefSeries)
-			require.True(t, ok, "expected first record to be a RefSeries")
-			actualType := reflect.TypeOf(recs[1])
-			require.Equal(t, tc.expectedType, actualType, "expected second record to be a %s", tc.expectedType)
-			_, ok = recs[2].([]record.RefExemplar)
-			require.True(t, ok, "expected third record to be a RefExemplar")
+			sr, err := wlog.NewSegmentsReader(w.Dir())
+			require.NoError(t, err)
+			defer func() {
+				require.NoError(t, sr.Close())
+			}()
+
+			dec := record.NewDecoder(labels.NewSymbolTable(), nil)
+			r := wlog.NewReader(sr)
+
+			var records [][]byte
+			for r.Next() {
+				records = append(records, append([]byte(nil), r.Record()...))
+			}
+			require.NoError(t, r.Err())
+			require.Len(t, records, 2, "expected 2 WAL records (RefSeries and compound SamplesV2 with attached exemplar)")
+
+			require.Equal(t, record.Series, dec.Type(records[0]), "expected first record to be Series")
+			require.Equal(t, tc.expectedType, dec.Type(records[1]), "expected second record to be %v", tc.expectedType)
+			tc.verifyEx(t, dec, records[1])
 		})
 	}
 }
