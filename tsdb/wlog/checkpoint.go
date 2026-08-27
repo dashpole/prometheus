@@ -374,6 +374,49 @@ func Checkpoint(logger *slog.Logger, w *WL, from, to int, keep func(id chunks.He
 			}
 			stats.TotalMetadata += len(metadata)
 			stats.DroppedMetadata += len(metadata) - repl
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			if _, err = dec.ScrapeEnvelope(rec, &env); err != nil {
+				return nil, fmt.Errorf("decode scrape envelope: %w", err)
+			}
+			filteredEnv := record.ScrapeEnvelope{}
+			for _, s := range env.Floats {
+				if s.T >= mint {
+					filteredEnv.Floats = append(filteredEnv.Floats, s)
+				}
+			}
+			for _, h := range env.Histograms {
+				if h.T >= mint {
+					filteredEnv.Histograms = append(filteredEnv.Histograms, h)
+				}
+			}
+			for _, fh := range env.FloatHistograms {
+				if fh.T >= mint {
+					filteredEnv.FloatHistograms = append(filteredEnv.FloatHistograms, fh)
+				}
+			}
+			for _, e := range env.Exemplars {
+				if e.T >= mint {
+					filteredEnv.Exemplars = append(filteredEnv.Exemplars, e)
+				}
+			}
+			for _, m := range env.Metadata {
+				if keep(m.Ref) {
+					if _, ok := latestMetadataMap[m.Ref]; !ok {
+						stats.TotalMetadata++
+					}
+					latestMetadataMap[m.Ref] = m
+				}
+			}
+			if !filteredEnv.IsEmpty() {
+				buf = enc.ScrapeEnvelope(filteredEnv, buf)
+			}
+			totalSamples := len(env.Floats) + len(env.Histograms) + len(env.FloatHistograms)
+			keptSamples := len(filteredEnv.Floats) + len(filteredEnv.Histograms) + len(filteredEnv.FloatHistograms)
+			stats.TotalSamples += totalSamples
+			stats.DroppedSamples += totalSamples - keptSamples
+			stats.TotalExemplars += len(env.Exemplars)
+			stats.DroppedExemplars += len(env.Exemplars) - len(filteredEnv.Exemplars)
 		default:
 			// Unknown record type, probably from a future Prometheus version.
 			continue

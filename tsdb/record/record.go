@@ -16,8 +16,10 @@
 package record
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 	"math"
 	"unsafe"
@@ -31,6 +33,8 @@ import (
 	"github.com/prometheus/prometheus/tsdb/encoding"
 	"github.com/prometheus/prometheus/tsdb/tombstones"
 )
+
+var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 
 // Type represents the data type of a record.
 type Type uint8
@@ -64,6 +68,8 @@ const (
 	HistogramSamplesV2 Type = 12
 	// FloatHistogramSamplesV2 is an enhanced float histogram record that supports start time per sample.
 	FloatHistogramSamplesV2 Type = 13
+	// ScrapeEnvelopes is used to match WAL records of type ScrapeEnvelope.
+	ScrapeEnvelopes Type = 14
 )
 
 func (rt Type) String() string {
@@ -90,6 +96,8 @@ func (rt Type) String() string {
 		return "histogram_samples_v2"
 	case FloatHistogramSamplesV2:
 		return "float_histogram_samples_v2"
+	case ScrapeEnvelopes:
+		return "scrape_envelope"
 	case MmapMarkers:
 		return "mmapmarkers"
 	case Metadata:
@@ -213,6 +221,33 @@ type RefMmapMarker struct {
 	MmapRef chunks.ChunkDiskMapperRef
 }
 
+// ScrapeEnvelope represents a transactional batch of samples and exemplars committed in a single scrape.
+type ScrapeEnvelope struct {
+	Floats          []RefSample
+	Histograms      []RefHistogramSample
+	FloatHistograms []RefFloatHistogramSample
+	Exemplars       []RefExemplar
+	Metadata        []RefMetadata
+}
+
+// Reset clears the slices in ScrapeEnvelope while preserving allocated slice capacities.
+func (env *ScrapeEnvelope) Reset() {
+	env.Floats = env.Floats[:0]
+	env.Histograms = env.Histograms[:0]
+	env.FloatHistograms = env.FloatHistograms[:0]
+	env.Exemplars = env.Exemplars[:0]
+	env.Metadata = env.Metadata[:0]
+}
+
+// IsEmpty returns true if the ScrapeEnvelope contains no samples, histograms, exemplars, or metadata.
+func (env *ScrapeEnvelope) IsEmpty() bool {
+	return len(env.Floats) == 0 &&
+		len(env.Histograms) == 0 &&
+		len(env.FloatHistograms) == 0 &&
+		len(env.Exemplars) == 0 &&
+		len(env.Metadata) == 0
+}
+
 // Decoder decodes series, sample, metadata and tombstone records.
 type Decoder struct {
 	builder labels.ScratchBuilder
@@ -234,7 +269,7 @@ func (*Decoder) Type(rec []byte) Type {
 	switch t := Type(rec[0]); t {
 	case Series, Samples, SamplesV2, Tombstones, Exemplars, MmapMarkers, Metadata,
 		HistogramSamples, FloatHistogramSamples, CustomBucketsHistogramSamples, CustomBucketsFloatHistogramSamples,
-		HistogramSamplesV2, FloatHistogramSamplesV2:
+		HistogramSamplesV2, FloatHistogramSamplesV2, ScrapeEnvelopes:
 		return t
 	}
 	return Unknown
@@ -872,6 +907,110 @@ func DecodeFloatHistogram(buf *encoding.Decbuf, fh *histogram.FloatHistogram) {
 	}
 }
 
+// ScrapeEnvelope decodes a ScrapeEnvelope record into env.
+func (d *Decoder) ScrapeEnvelope(rec []byte, env *ScrapeEnvelope) (*ScrapeEnvelope, error) {
+	if env == nil {
+		env = &ScrapeEnvelope{}
+	}
+	if len(rec) < 7 {
+		return nil, errors.New("record too short for ScrapeEnvelope")
+	}
+	if Type(rec[0]) != ScrapeEnvelopes {
+		return nil, errors.New("invalid record type, expected ScrapeEnvelope")
+	}
+	version := rec[1]
+	if version != 1 {
+		return nil, fmt.Errorf("unsupported ScrapeEnvelope version %d", version)
+	}
+	expectedCRC := binary.BigEndian.Uint32(rec[3:7])
+	payload := rec[7:]
+	actualCRC := crc32.Checksum(payload, castagnoliTable)
+	if actualCRC != expectedCRC {
+		return nil, fmt.Errorf("invalid checksum for ScrapeEnvelope: expected %x, got %x: %w", expectedCRC, actualCRC, encoding.ErrInvalidChecksum)
+	}
+
+	dec := encoding.Decbuf{B: payload}
+
+	// 1. Floats
+	floatsBytes := dec.UvarintBytes()
+	if len(floatsBytes) > 0 {
+		var err error
+		env.Floats, err = d.Samples(floatsBytes, env.Floats)
+		if err != nil {
+			return nil, fmt.Errorf("decode floats in scrape envelope: %w", err)
+		}
+	}
+
+	// 2. Histograms
+	hBytes := dec.UvarintBytes()
+	if len(hBytes) > 0 {
+		var err error
+		env.Histograms, err = d.HistogramSamples(hBytes, env.Histograms)
+		if err != nil {
+			return nil, fmt.Errorf("decode histograms in scrape envelope: %w", err)
+		}
+	}
+
+	// 3. Custom Buckets Histograms
+	cbHBytes := dec.UvarintBytes()
+	if len(cbHBytes) > 0 {
+		var err error
+		env.Histograms, err = d.HistogramSamples(cbHBytes, env.Histograms)
+		if err != nil {
+			return nil, fmt.Errorf("decode custom bucket histograms in scrape envelope: %w", err)
+		}
+	}
+
+	// 4. Float Histograms
+	fhBytes := dec.UvarintBytes()
+	if len(fhBytes) > 0 {
+		var err error
+		env.FloatHistograms, err = d.FloatHistogramSamples(fhBytes, env.FloatHistograms)
+		if err != nil {
+			return nil, fmt.Errorf("decode float histograms in scrape envelope: %w", err)
+		}
+	}
+
+	// 5. Custom Buckets Float Histograms
+	cbFHBytes := dec.UvarintBytes()
+	if len(cbFHBytes) > 0 {
+		var err error
+		env.FloatHistograms, err = d.FloatHistogramSamples(cbFHBytes, env.FloatHistograms)
+		if err != nil {
+			return nil, fmt.Errorf("decode custom bucket float histograms in scrape envelope: %w", err)
+		}
+	}
+
+	// 6. Exemplars
+	exBytes := dec.UvarintBytes()
+	if len(exBytes) > 0 {
+		var err error
+		env.Exemplars, err = d.Exemplars(exBytes, env.Exemplars)
+		if err != nil {
+			return nil, fmt.Errorf("decode exemplars in scrape envelope: %w", err)
+		}
+	}
+
+	// 7. Metadata
+	metaBytes := dec.UvarintBytes()
+	if len(metaBytes) > 0 {
+		var err error
+		env.Metadata, err = d.Metadata(metaBytes, env.Metadata)
+		if err != nil {
+			return nil, fmt.Errorf("decode metadata in scrape envelope: %w", err)
+		}
+	}
+
+	if dec.Err() != nil {
+		return nil, dec.Err()
+	}
+	if len(dec.B) > 0 {
+		return nil, fmt.Errorf("unexpected %d bytes left in scrape envelope entry", len(dec.B))
+	}
+
+	return env, nil
+}
+
 // Encoder encodes series, sample, and tombstones records.
 // The zero value is ready to use.
 type Encoder struct {
@@ -1371,4 +1510,93 @@ func EncodeFloatHistogram(buf *encoding.Encbuf, h *histogram.FloatHistogram) {
 			buf.PutBEFloat64(v)
 		}
 	}
+}
+
+// ScrapeEnvelope appends the encoded scrape envelope to b and returns the resulting slice.
+func (e *Encoder) ScrapeEnvelope(env ScrapeEnvelope, b []byte) []byte {
+	buf := encoding.Encbuf{B: b}
+	buf.PutByte(byte(ScrapeEnvelopes))
+	buf.PutByte(1) // version 1
+	var flags byte
+	if e.EnableSTStorage {
+		flags |= 1
+	}
+	buf.PutByte(flags)
+	crcPos := len(buf.B)
+	buf.PutBE32(0) // placeholder for CRC32
+
+	payloadStart := len(buf.B)
+
+	// Floats
+	if len(env.Floats) > 0 {
+		floatsRec := e.Samples(env.Floats, nil)
+		buf.PutUvarintBytes(floatsRec)
+	} else {
+		buf.PutUvarintBytes(nil)
+	}
+
+	// Histograms
+	if len(env.Histograms) > 0 {
+		if e.EnableSTStorage {
+			hRec := e.histogramSamplesV2(env.Histograms, nil)
+			buf.PutUvarintBytes(hRec)
+			buf.PutUvarintBytes(nil)
+		} else {
+			hRec, cbRec := e.histogramSamplesV1(env.Histograms, nil)
+			buf.PutUvarintBytes(hRec)
+			if len(cbRec) > 0 {
+				cbBytes := e.customBucketsHistogramSamplesV1(cbRec, nil)
+				buf.PutUvarintBytes(cbBytes)
+			} else {
+				buf.PutUvarintBytes(nil)
+			}
+		}
+	} else {
+		buf.PutUvarintBytes(nil)
+		buf.PutUvarintBytes(nil)
+	}
+
+	// Float Histograms
+	if len(env.FloatHistograms) > 0 {
+		if e.EnableSTStorage {
+			fhRec := e.floatHistogramSamplesV2(env.FloatHistograms, nil)
+			buf.PutUvarintBytes(fhRec)
+			buf.PutUvarintBytes(nil)
+		} else {
+			fhRec, cbRec := e.floatHistogramSamplesV1(env.FloatHistograms, nil)
+			buf.PutUvarintBytes(fhRec)
+			if len(cbRec) > 0 {
+				cbBytes := e.customBucketsFloatHistogramSamplesV1(cbRec, nil)
+				buf.PutUvarintBytes(cbBytes)
+			} else {
+				buf.PutUvarintBytes(nil)
+			}
+		}
+	} else {
+		buf.PutUvarintBytes(nil)
+		buf.PutUvarintBytes(nil)
+	}
+
+	// Exemplars
+	if len(env.Exemplars) > 0 {
+		exRec := e.Exemplars(env.Exemplars, nil)
+		buf.PutUvarintBytes(exRec)
+	} else {
+		buf.PutUvarintBytes(nil)
+	}
+
+	// Metadata
+	if len(env.Metadata) > 0 {
+		metaRec := e.Metadata(env.Metadata, nil)
+		buf.PutUvarintBytes(metaRec)
+	} else {
+		buf.PutUvarintBytes(nil)
+	}
+
+	// Compute CRC32 of payload
+	payload := buf.B[payloadStart:]
+	crc := crc32.Checksum(payload, castagnoliTable)
+	binary.BigEndian.PutUint32(buf.B[crcPos:crcPos+4], crc)
+
+	return buf.Get()
 }

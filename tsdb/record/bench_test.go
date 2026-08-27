@@ -17,8 +17,11 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/compression"
 	"github.com/prometheus/prometheus/tsdb/record"
 	"github.com/prometheus/prometheus/util/testrecord"
@@ -450,5 +453,82 @@ func BenchmarkDecode_FloatHistograms(b *testing.B) {
 				}
 			}
 		}
+	}
+}
+
+func BenchmarkScrapeEnvelope_Encode(b *testing.B) {
+	for _, enableST := range []bool{false, true} {
+		b.Run(fmt.Sprintf("enableST=%v", enableST), func(b *testing.B) {
+			enc := record.Encoder{EnableSTStorage: enableST}
+			numSamples := 1000
+			env := record.ScrapeEnvelope{
+				Floats:    make([]record.RefSample, numSamples),
+				Exemplars: make([]record.RefExemplar, 50),
+			}
+			for i := 0; i < numSamples; i++ {
+				env.Floats[i] = record.RefSample{
+					Ref: chunks.HeadSeriesRef(i),
+					T:   int64(i * 1000),
+					ST:  int64(i * 900),
+					V:   float64(i),
+				}
+			}
+			for i := 0; i < 50; i++ {
+				env.Exemplars[i] = record.RefExemplar{
+					Ref:    chunks.HeadSeriesRef(i),
+					T:      int64(i * 1000),
+					V:      float64(i),
+					Labels: labels.FromStrings("traceID", fmt.Sprintf("trace-%d", i)),
+				}
+			}
+
+			var buf []byte
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				buf = enc.ScrapeEnvelope(env, buf[:0])
+			}
+		})
+	}
+}
+
+func BenchmarkScrapeEnvelope_Decode(b *testing.B) {
+	for _, enableST := range []bool{false, true} {
+		b.Run(fmt.Sprintf("enableST=%v", enableST), func(b *testing.B) {
+			enc := record.Encoder{EnableSTStorage: enableST}
+			dec := record.NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+			numSamples := 1000
+			env := record.ScrapeEnvelope{
+				Floats:    make([]record.RefSample, numSamples),
+				Exemplars: make([]record.RefExemplar, 50),
+			}
+			for i := 0; i < numSamples; i++ {
+				env.Floats[i] = record.RefSample{
+					Ref: chunks.HeadSeriesRef(i),
+					T:   int64(i * 1000),
+					ST:  int64(i * 900),
+					V:   float64(i),
+				}
+			}
+			for i := 0; i < 50; i++ {
+				env.Exemplars[i] = record.RefExemplar{
+					Ref:    chunks.HeadSeriesRef(i),
+					T:      int64(i * 1000),
+					V:      float64(i),
+					Labels: labels.FromStrings("traceID", fmt.Sprintf("trace-%d", i)),
+				}
+			}
+
+			encoded := enc.ScrapeEnvelope(env, nil)
+			pool := record.NewBuffersPool()
+			targetEnv := pool.GetScrapeEnvelope()
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				targetEnv.Reset()
+				_, _ = dec.ScrapeEnvelope(encoded, targetEnv)
+			}
+		})
 	}
 }

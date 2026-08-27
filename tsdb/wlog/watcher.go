@@ -59,6 +59,7 @@ type WriteTo interface {
 	AppendExemplars([]record.RefExemplar) bool
 	AppendHistograms([]record.RefHistogramSample) bool
 	AppendFloatHistograms([]record.RefFloatHistogramSample) bool
+	AppendScrapeEnvelope(record.ScrapeEnvelope) bool
 	StoreSeries([]record.RefSeries, int)
 	StoreMetadata([]record.RefMetadata)
 
@@ -658,6 +659,59 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 				return err
 			}
 			w.writer.StoreMetadata(metadata)
+
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			if err != nil {
+				w.recordDecodeFailsMetric.Inc()
+				return err
+			}
+			if w.sendMetadata && len(env.Metadata) > 0 {
+				w.writer.StoreMetadata(env.Metadata)
+			}
+			if !tail {
+				break
+			}
+			filteredEnv := record.ScrapeEnvelope{}
+			for _, s := range env.Floats {
+				if s.T > w.startTimestamp {
+					if !w.sendSamples {
+						w.sendSamples = true
+						duration := time.Since(w.startTime)
+						w.logger.Info("Done replaying WAL", "duration", duration)
+					}
+					filteredEnv.Floats = append(filteredEnv.Floats, s)
+				}
+			}
+			if w.sendHistograms {
+				for _, h := range env.Histograms {
+					if h.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						filteredEnv.Histograms = append(filteredEnv.Histograms, h)
+					}
+				}
+				for _, fh := range env.FloatHistograms {
+					if fh.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						filteredEnv.FloatHistograms = append(filteredEnv.FloatHistograms, fh)
+					}
+				}
+			}
+			if w.sendExemplars {
+				filteredEnv.Exemplars = env.Exemplars
+			}
+			if !filteredEnv.IsEmpty() {
+				w.writer.AppendScrapeEnvelope(filteredEnv)
+			}
 
 		case record.Unknown:
 			// Could be corruption, or reading from a WAL from a newer Prometheus.

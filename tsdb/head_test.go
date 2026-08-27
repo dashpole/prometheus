@@ -185,6 +185,25 @@ func readTestWAL(t testing.TB, dir string) (recs []any) {
 			exemplars, err := dec.Exemplars(rec, nil)
 			require.NoError(t, err)
 			recs = append(recs, exemplars)
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err := dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			if len(env.Floats) > 0 {
+				recs = append(recs, env.Floats)
+			}
+			if len(env.Histograms) > 0 {
+				recs = append(recs, env.Histograms)
+			}
+			if len(env.FloatHistograms) > 0 {
+				recs = append(recs, env.FloatHistograms)
+			}
+			if len(env.Exemplars) > 0 {
+				recs = append(recs, env.Exemplars)
+			}
+			if len(env.Metadata) > 0 {
+				recs = append(recs, env.Metadata)
+			}
 		default:
 			require.Fail(t, "unknown record type")
 		}
@@ -8976,13 +8995,22 @@ func TestHeadAppender_WALEncoder_EnableSTStorage(t *testing.T) {
 
 			var foundSampleRecord bool
 			for r.Next() {
-				rt := dec.Type(r.Record())
+				rec := r.Record()
+				rt := dec.Type(rec)
 				switch rt {
 				case record.Samples:
 					require.False(t, enableST, "WAL contains Samples (V1) record but EnableSTStorage=true, expected SamplesV2")
 					foundSampleRecord = true
 				case record.SamplesV2:
 					require.True(t, enableST, "WAL contains SamplesV2 record but EnableSTStorage=false, expected Samples (V1)")
+					foundSampleRecord = true
+				case record.ScrapeEnvelopes:
+					hasSTFlag := (rec[2] & 1) != 0
+					if enableST {
+						require.True(t, hasSTFlag, "ScrapeEnvelope has EnableSTStorage=false, expected true")
+					} else {
+						require.False(t, hasSTFlag, "ScrapeEnvelope has EnableSTStorage=true, expected false")
+					}
 					foundSampleRecord = true
 				}
 			}

@@ -968,6 +968,288 @@ outer:
 	return true
 }
 
+type exemplarMap map[chunks.HeadSeriesRef][]record.RefExemplar
+
+var exemplarMapPool = sync.Pool{
+	New: func() any {
+		return make(exemplarMap, 32)
+	},
+}
+
+// AppendScrapeEnvelope processes all samples, histograms, and exemplars in a single atomic scrape transaction,
+// performing pre-shard exemplar correlation using pooled memory structures before enqueuing to shard queues.
+func (t *QueueManager) AppendScrapeEnvelope(env record.ScrapeEnvelope) bool {
+	if env.IsEmpty() {
+		return true
+	}
+	if t.mcfg.Send && len(env.Metadata) > 0 {
+		t.StoreMetadata(env.Metadata)
+	}
+
+	currentTime := time.Now()
+	exemplars := env.Exemplars
+	if !t.sendExemplars {
+		exemplars = nil
+	}
+
+	if len(exemplars) == 0 {
+		if len(env.Floats) > 0 {
+			if !t.Append(env.Floats) {
+				return false
+			}
+		}
+		if len(env.Histograms) > 0 {
+			if !t.AppendHistograms(env.Histograms) {
+				return false
+			}
+		}
+		if len(env.FloatHistograms) > 0 {
+			if !t.AppendFloatHistograms(env.FloatHistograms) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Group exemplars by SeriesRef using pooled map.
+	exMap := exemplarMapPool.Get().(exemplarMap)
+	defer func() {
+		clear(exMap)
+		exemplarMapPool.Put(exMap)
+	}()
+
+	for _, e := range exemplars {
+		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), e.T) {
+			t.metrics.droppedExemplarsTotal.WithLabelValues(reasonTooOld).Inc()
+			continue
+		}
+		exMap[e.Ref] = append(exMap[e.Ref], e)
+	}
+
+	// Enqueue float samples with attached exemplars.
+	for _, s := range env.Floats {
+		if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), s.T) {
+			t.metrics.droppedSamplesTotal.WithLabelValues(reasonTooOld).Inc()
+			continue
+		}
+		t.seriesMtx.Lock()
+		lbls, ok := t.seriesLabels[s.Ref]
+		if !ok {
+			t.dataDropped.incr(1)
+			if _, ok := t.droppedSeries[s.Ref]; !ok {
+				t.logger.Info("Dropped sample for series that was not explicitly dropped via relabelling", "ref", s.Ref)
+				t.metrics.droppedSamplesTotal.WithLabelValues(reasonUnintentionalDroppedSeries).Inc()
+			} else {
+				t.metrics.droppedSamplesTotal.WithLabelValues(reasonDroppedSeries).Inc()
+			}
+			t.seriesMtx.Unlock()
+			continue
+		}
+		meta := t.seriesMetadata[s.Ref]
+		t.seriesMtx.Unlock()
+
+		exs := exMap[s.Ref]
+		delete(exMap, s.Ref)
+
+		ts := timeSeries{
+			seriesLabels:   lbls,
+			metadata:       meta,
+			startTimestamp: s.ST,
+			timestamp:      s.T,
+			value:          s.V,
+			exemplars:      exs,
+			sType:          tSample,
+		}
+
+		backoff := model.Duration(5 * time.Millisecond)
+		for {
+			select {
+			case <-t.quit:
+				return false
+			default:
+			}
+			if t.shards.enqueue(s.Ref, ts) {
+				break
+			}
+			t.metrics.enqueueRetriesTotal.Inc()
+			time.Sleep(time.Duration(backoff))
+			backoff *= 2
+			if backoff > t.cfg.MaxBackoff {
+				backoff = t.cfg.MaxBackoff
+			}
+		}
+	}
+
+	// Enqueue integer histograms with attached exemplars.
+	if t.sendNativeHistograms {
+		for _, h := range env.Histograms {
+			if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), h.T) {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
+				continue
+			}
+			if t.protoMsg == remoteapi.WriteV1MessageType && h.H != nil && h.H.Schema == histogram.CustomBucketsSchema {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
+				continue
+			}
+			t.seriesMtx.Lock()
+			lbls, ok := t.seriesLabels[h.Ref]
+			if !ok {
+				t.dataDropped.incr(1)
+				if _, ok := t.droppedSeries[h.Ref]; !ok {
+					t.logger.Info("Dropped histogram for series that was not explicitly dropped via relabelling", "ref", h.Ref)
+					t.metrics.droppedHistogramsTotal.WithLabelValues(reasonUnintentionalDroppedSeries).Inc()
+				} else {
+					t.metrics.droppedHistogramsTotal.WithLabelValues(reasonDroppedSeries).Inc()
+				}
+				t.seriesMtx.Unlock()
+				continue
+			}
+			meta := t.seriesMetadata[h.Ref]
+			t.seriesMtx.Unlock()
+
+			exs := exMap[h.Ref]
+			delete(exMap, h.Ref)
+
+			ts := timeSeries{
+				seriesLabels:   lbls,
+				metadata:       meta,
+				startTimestamp: h.ST,
+				timestamp:      h.T,
+				histogram:      h.H,
+				exemplars:      exs,
+				sType:          tHistogram,
+			}
+
+			backoff := t.cfg.MinBackoff
+			for {
+				select {
+				case <-t.quit:
+					return false
+				default:
+				}
+				if t.shards.enqueue(h.Ref, ts) {
+					break
+				}
+				t.metrics.enqueueRetriesTotal.Inc()
+				time.Sleep(time.Duration(backoff))
+				backoff *= 2
+				if backoff > t.cfg.MaxBackoff {
+					backoff = t.cfg.MaxBackoff
+				}
+			}
+		}
+
+		// Enqueue float histograms with attached exemplars.
+		for _, fh := range env.FloatHistograms {
+			if isSampleOld(currentTime, time.Duration(t.cfg.SampleAgeLimit), fh.T) {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonTooOld).Inc()
+				continue
+			}
+			if t.protoMsg == remoteapi.WriteV1MessageType && fh.FH != nil && fh.FH.Schema == histogram.CustomBucketsSchema {
+				t.metrics.droppedHistogramsTotal.WithLabelValues(reasonNHCBNotSupported).Inc()
+				continue
+			}
+			t.seriesMtx.Lock()
+			lbls, ok := t.seriesLabels[fh.Ref]
+			if !ok {
+				t.dataDropped.incr(1)
+				if _, ok := t.droppedSeries[fh.Ref]; !ok {
+					t.logger.Info("Dropped float histogram for series that was not explicitly dropped via relabelling", "ref", fh.Ref)
+					t.metrics.droppedHistogramsTotal.WithLabelValues(reasonUnintentionalDroppedSeries).Inc()
+				} else {
+					t.metrics.droppedHistogramsTotal.WithLabelValues(reasonDroppedSeries).Inc()
+				}
+				t.seriesMtx.Unlock()
+				continue
+			}
+			meta := t.seriesMetadata[fh.Ref]
+			t.seriesMtx.Unlock()
+
+			exs := exMap[fh.Ref]
+			delete(exMap, fh.Ref)
+
+			ts := timeSeries{
+				seriesLabels:   lbls,
+				metadata:       meta,
+				startTimestamp: fh.ST,
+				timestamp:      fh.T,
+				floatHistogram: fh.FH,
+				exemplars:      exs,
+				sType:          tFloatHistogram,
+			}
+
+			backoff := t.cfg.MinBackoff
+			for {
+				select {
+				case <-t.quit:
+					return false
+				default:
+				}
+				if t.shards.enqueue(fh.Ref, ts) {
+					break
+				}
+				t.metrics.enqueueRetriesTotal.Inc()
+				time.Sleep(time.Duration(backoff))
+				backoff *= 2
+				if backoff > t.cfg.MaxBackoff {
+					backoff = t.cfg.MaxBackoff
+				}
+			}
+		}
+	}
+
+	// Enqueue orphan exemplars.
+	if len(exMap) > 0 {
+		for ref, exs := range exMap {
+			t.seriesMtx.Lock()
+			lbls, ok := t.seriesLabels[ref]
+			if !ok {
+				t.dataDropped.incr(1)
+				if _, ok := t.droppedSeries[ref]; !ok {
+					t.logger.Info("Dropped exemplar for series that was not explicitly dropped via relabelling", "ref", ref)
+					t.metrics.droppedExemplarsTotal.WithLabelValues(reasonUnintentionalDroppedSeries).Inc()
+				} else {
+					t.metrics.droppedExemplarsTotal.WithLabelValues(reasonDroppedSeries).Inc()
+				}
+				t.seriesMtx.Unlock()
+				continue
+			}
+			meta := t.seriesMetadata[ref]
+			t.seriesMtx.Unlock()
+
+			for _, e := range exs {
+				ts := timeSeries{
+					seriesLabels:   lbls,
+					metadata:       meta,
+					timestamp:      e.T,
+					value:          e.V,
+					exemplarLabels: e.Labels,
+					sType:          tExemplar,
+				}
+				backoff := t.cfg.MinBackoff
+				for {
+					select {
+					case <-t.quit:
+						return false
+					default:
+					}
+					if t.shards.enqueue(ref, ts) {
+						break
+					}
+					t.metrics.enqueueRetriesTotal.Inc()
+					time.Sleep(time.Duration(backoff))
+					backoff *= 2
+					if backoff > t.cfg.MaxBackoff {
+						backoff = t.cfg.MaxBackoff
+					}
+				}
+			}
+		}
+	}
+
+	return true
+}
+
 // Start the queue manager sending samples to the remote storage.
 // Does not block.
 func (t *QueueManager) Start() {
@@ -1375,12 +1657,20 @@ func (s *shards) enqueue(ref chunks.HeadSeriesRef, data timeSeries) bool {
 		case tSample:
 			s.qm.metrics.pendingSamples.Inc()
 			s.enqueuedSamples.Inc()
+			if len(data.exemplars) > 0 {
+				s.qm.metrics.pendingExemplars.Add(float64(len(data.exemplars)))
+				s.enqueuedExemplars.Add(int64(len(data.exemplars)))
+			}
 		case tExemplar:
 			s.qm.metrics.pendingExemplars.Inc()
 			s.enqueuedExemplars.Inc()
 		case tHistogram, tFloatHistogram:
 			s.qm.metrics.pendingHistograms.Inc()
 			s.enqueuedHistograms.Inc()
+			if len(data.exemplars) > 0 {
+				s.qm.metrics.pendingExemplars.Add(float64(len(data.exemplars)))
+				s.enqueuedExemplars.Add(int64(len(data.exemplars)))
+			}
 		default:
 			return true
 		}
@@ -1410,6 +1700,7 @@ type timeSeries struct {
 	metadata                  *metadata.Metadata
 	startTimestamp, timestamp int64
 	exemplarLabels            labels.Labels
+	exemplars                 []record.RefExemplar
 	// The type of series: sample, exemplar, or histogram.
 	sType seriesType
 }
@@ -1679,6 +1970,16 @@ func populateTimeSeries(batch []timeSeries, pendingData []prompb.TimeSeries, sen
 				Timestamp: d.timestamp,
 			})
 			nPendingSamples++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, prompb.Exemplar{
+						Labels:    prompb.FromLabels(ex.Labels, nil),
+						Value:     ex.V,
+						Timestamp: ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		case tExemplar:
 			pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, prompb.Exemplar{
 				Labels:    prompb.FromLabels(d.exemplarLabels, nil),
@@ -1689,9 +1990,29 @@ func populateTimeSeries(batch []timeSeries, pendingData []prompb.TimeSeries, sen
 		case tHistogram:
 			pendingData[nPending].Histograms = append(pendingData[nPending].Histograms, prompb.FromIntHistogram(d.timestamp, d.histogram))
 			nPendingHistograms++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, prompb.Exemplar{
+						Labels:    prompb.FromLabels(ex.Labels, nil),
+						Value:     ex.V,
+						Timestamp: ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		case tFloatHistogram:
 			pendingData[nPending].Histograms = append(pendingData[nPending].Histograms, prompb.FromFloatHistogram(d.timestamp, d.floatHistogram))
 			nPendingHistograms++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, prompb.Exemplar{
+						Labels:    prompb.FromLabels(ex.Labels, nil),
+						Value:     ex.V,
+						Timestamp: ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		}
 	}
 	return nPendingSamples, nPendingExemplars, nPendingHistograms
@@ -2017,6 +2338,16 @@ func populateV2TimeSeries(symbolTable *writev2.SymbolsTable, batch []timeSeries,
 				StartTimestamp: d.startTimestamp,
 			})
 			nPendingSamples++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, writev2.Exemplar{
+						LabelsRefs: symbolTable.SymbolizeLabels(ex.Labels, nil),
+						Value:      ex.V,
+						Timestamp:  ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		case tExemplar:
 			pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, writev2.Exemplar{
 				LabelsRefs: symbolTable.SymbolizeLabels(d.exemplarLabels, nil), // TODO: optimize, reuse slice
@@ -2027,9 +2358,29 @@ func populateV2TimeSeries(symbolTable *writev2.SymbolsTable, batch []timeSeries,
 		case tHistogram:
 			pendingData[nPending].Histograms = append(pendingData[nPending].Histograms, writev2.FromIntHistogram(d.startTimestamp, d.timestamp, d.histogram))
 			nPendingHistograms++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, writev2.Exemplar{
+						LabelsRefs: symbolTable.SymbolizeLabels(ex.Labels, nil),
+						Value:      ex.V,
+						Timestamp:  ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		case tFloatHistogram:
 			pendingData[nPending].Histograms = append(pendingData[nPending].Histograms, writev2.FromFloatHistogram(d.startTimestamp, d.timestamp, d.floatHistogram))
 			nPendingHistograms++
+			if sendExemplars && len(d.exemplars) > 0 {
+				for _, ex := range d.exemplars {
+					pendingData[nPending].Exemplars = append(pendingData[nPending].Exemplars, writev2.Exemplar{
+						LabelsRefs: symbolTable.SymbolizeLabels(ex.Labels, nil),
+						Value:      ex.V,
+						Timestamp:  ex.T,
+					})
+					nPendingExemplars++
+				}
+			}
 		case tMetadata:
 			nUnexpectedMetadata++
 		}

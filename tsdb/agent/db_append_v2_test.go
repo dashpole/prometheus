@@ -307,6 +307,30 @@ func TestCommit_AppendV2(t *testing.T) {
 					require.NoError(t, err)
 					walExemplarsCount += len(exemplars)
 
+				case record.ScrapeEnvelopes:
+					var env record.ScrapeEnvelope
+					_, err = dec.ScrapeEnvelope(rec, &env)
+					require.NoError(t, err)
+					walSamplesCount += len(env.Floats)
+					for _, s := range env.Floats {
+						if enableSTStorage {
+							gotSampleSTs = append(gotSampleSTs, s.ST)
+						}
+					}
+					walHistogramCount += len(env.Histograms)
+					for _, h := range env.Histograms {
+						if enableSTStorage {
+							gotHistogramSTs = append(gotHistogramSTs, h.ST)
+						}
+					}
+					walFloatHistogramCount += len(env.FloatHistograms)
+					for _, fh := range env.FloatHistograms {
+						if enableSTStorage {
+							gotFloatHistogramSTs = append(gotFloatHistogramSTs, fh.ST)
+						}
+					}
+					walExemplarsCount += len(env.Exemplars)
+
 				default:
 				}
 			}
@@ -435,8 +459,8 @@ func TestRollbackAppendV2(t *testing.T) {
 			case record.Exemplars:
 				t.Error("should not have found exemplars")
 
-			case record.HistogramSamples, record.CustomBucketsHistogramSamples, record.FloatHistogramSamples, record.CustomBucketsFloatHistogramSamples, record.HistogramSamplesV2, record.FloatHistogramSamplesV2:
-				t.Error("should not have found histograms")
+			case record.HistogramSamples, record.CustomBucketsHistogramSamples, record.FloatHistogramSamples, record.CustomBucketsFloatHistogramSamples, record.HistogramSamplesV2, record.FloatHistogramSamplesV2, record.ScrapeEnvelopes:
+				t.Error("should not have found histograms or scrape envelopes")
 
 			default:
 			}
@@ -860,11 +884,17 @@ func TestStorage_DuplicateExemplarsIgnored_AppendV2(t *testing.T) {
 	dec := record.NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
 	for r.Next() {
 		rec := r.Record()
-		if dec.Type(rec) == record.Exemplars {
+		switch dec.Type(rec) {
+		case record.Exemplars:
 			var exemplars []record.RefExemplar
 			exemplars, err = dec.Exemplars(rec, exemplars)
 			require.NoError(t, err)
 			walExemplarsCount += len(exemplars)
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			walExemplarsCount += len(env.Exemplars)
 		}
 	}
 

@@ -306,6 +306,15 @@ func TestCommit(t *testing.T) {
 			require.NoError(t, err)
 			walExemplarsCount += len(exemplars)
 
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			walSamplesCount += len(env.Floats)
+			walExemplarsCount += len(env.Exemplars)
+			walHistogramCount += len(env.Histograms)
+			walFloatHistogramCount += len(env.FloatHistograms)
+
 		default:
 		}
 	}
@@ -441,6 +450,15 @@ func TestRollback(t *testing.T) {
 			floatHistograms, err = dec.FloatHistogramSamples(rec, floatHistograms)
 			require.NoError(t, err)
 			walFloatHistogramCount += len(floatHistograms)
+
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			walSamplesCount += len(env.Floats)
+			walExemplarsCount += len(env.Exemplars)
+			walHistogramCount += len(env.Histograms)
+			walFloatHistogramCount += len(env.FloatHistograms)
 
 		default:
 		}
@@ -956,11 +974,17 @@ func TestStorage_DuplicateExemplarsIgnored(t *testing.T) {
 	dec := record.NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
 	for r.Next() {
 		rec := r.Record()
-		if dec.Type(rec) == record.Exemplars {
+		switch dec.Type(rec) {
+		case record.Exemplars:
 			var exemplars []record.RefExemplar
 			exemplars, err = dec.Exemplars(rec, exemplars)
 			require.NoError(t, err)
 			walExemplarsCount += len(exemplars)
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			walExemplarsCount += len(env.Exemplars)
 		}
 	}
 
@@ -1516,6 +1540,37 @@ func readWALSamples(t *testing.T, walDir string) []walSample {
 					st:   h.ST,
 					t:    h.T,
 					fh:   h.FH,
+					lbls: lastSeries.Labels.Copy(),
+					ref:  storage.SeriesRef(lastSeries.Ref),
+				})
+			}
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			for _, s := range env.Floats {
+				outputSamples = append(outputSamples, walSample{
+					st:   s.ST,
+					t:    s.T,
+					f:    s.V,
+					lbls: lastSeries.Labels.Copy(),
+					ref:  storage.SeriesRef(lastSeries.Ref),
+				})
+			}
+			for _, h := range env.Histograms {
+				outputSamples = append(outputSamples, walSample{
+					st:   h.ST,
+					t:    h.T,
+					h:    h.H,
+					lbls: lastSeries.Labels.Copy(),
+					ref:  storage.SeriesRef(lastSeries.Ref),
+				})
+			}
+			for _, fh := range env.FloatHistograms {
+				outputSamples = append(outputSamples, walSample{
+					st:   fh.ST,
+					t:    fh.T,
+					fh:   fh.FH,
 					lbls: lastSeries.Labels.Copy(),
 					ref:  storage.SeriesRef(lastSeries.Ref),
 				})

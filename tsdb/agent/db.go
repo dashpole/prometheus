@@ -542,6 +542,36 @@ func (db *DB) loadWAL(r *wlog.Reader, duplicateRefToValidRef map[chunks.HeadSeri
 					return
 				}
 				decoded <- floatHistograms
+			case record.ScrapeEnvelopes:
+				env := record.ScrapeEnvelope{
+					Floats:          db.walReplaySamplesPool.Get()[:0],
+					Histograms:      db.walReplayHistogramsPool.Get()[:0],
+					FloatHistograms: db.walReplayFloatHistogramsPool.Get()[:0],
+				}
+				_, err = dec.ScrapeEnvelope(rec, &env)
+				if err != nil {
+					errCh <- &wlog.CorruptionErr{
+						Err:     fmt.Errorf("decode scrape envelope: %w", err),
+						Segment: r.Segment(),
+						Offset:  r.Offset(),
+					}
+					return
+				}
+				if len(env.Floats) > 0 {
+					decoded <- env.Floats
+				} else {
+					db.walReplaySamplesPool.Put(env.Floats)
+				}
+				if len(env.Histograms) > 0 {
+					decoded <- env.Histograms
+				} else {
+					db.walReplayHistogramsPool.Put(env.Histograms)
+				}
+				if len(env.FloatHistograms) > 0 {
+					decoded <- env.FloatHistograms
+				} else {
+					db.walReplayFloatHistogramsPool.Put(env.FloatHistograms)
+				}
 			case record.Tombstones, record.Exemplars:
 				// We don't care about tombstones or exemplars during replay.
 				// TODO: If decide to decode exemplars, we should make sure to prepopulate
@@ -1236,52 +1266,14 @@ func (a *appenderBase) log() error {
 		buf = buf[:0]
 	}
 
-	if len(a.pendingSamples) > 0 {
-		buf = encoder.Samples(a.pendingSamples, buf)
-		if err := a.wal.Log(buf); err != nil {
-			return err
-		}
-		buf = buf[:0]
+	env := record.ScrapeEnvelope{
+		Floats:          a.pendingSamples,
+		Histograms:      a.pendingHistograms,
+		FloatHistograms: a.pendingFloatHistograms,
+		Exemplars:       a.pendingExamplars,
 	}
-
-	if len(a.pendingHistograms) > 0 {
-		var customBucketsHistograms []record.RefHistogramSample
-		buf, customBucketsHistograms = encoder.HistogramSamples(a.pendingHistograms, buf)
-		if len(buf) > 0 {
-			if err := a.wal.Log(buf); err != nil {
-				return err
-			}
-			buf = buf[:0]
-		}
-		if len(customBucketsHistograms) > 0 {
-			buf = encoder.CustomBucketsHistogramSamples(customBucketsHistograms, nil)
-			if err := a.wal.Log(buf); err != nil {
-				return err
-			}
-			buf = buf[:0]
-		}
-	}
-
-	if len(a.pendingFloatHistograms) > 0 {
-		var customBucketsFloatHistograms []record.RefFloatHistogramSample
-		buf, customBucketsFloatHistograms = encoder.FloatHistogramSamples(a.pendingFloatHistograms, buf)
-		if len(buf) > 0 {
-			if err := a.wal.Log(buf); err != nil {
-				return err
-			}
-			buf = buf[:0]
-		}
-		if len(customBucketsFloatHistograms) > 0 {
-			buf = encoder.CustomBucketsFloatHistogramSamples(customBucketsFloatHistograms, nil)
-			if err := a.wal.Log(buf); err != nil {
-				return err
-			}
-			buf = buf[:0]
-		}
-	}
-
-	if len(a.pendingExamplars) > 0 {
-		buf = encoder.Exemplars(a.pendingExamplars, buf)
+	if !env.IsEmpty() {
+		buf = encoder.ScrapeEnvelope(env, buf)
 		if err := a.wal.Log(buf); err != nil {
 			return err
 		}

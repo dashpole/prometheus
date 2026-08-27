@@ -82,6 +82,7 @@ type writeToMock struct {
 	exemplarAppends        int
 	histogramAppends       int
 	floatHistogramsAppends int
+	scrapeEnvelopesAppends int
 
 	seriesSegmentIndexes map[chunks.HeadSeriesRef]int
 
@@ -126,6 +127,35 @@ func (wtm *writeToMock) AppendFloatHistograms(fh []record.RefFloatHistogramSampl
 	time.Sleep(wtm.delay)
 	wtm.floatHistogramsAppends++
 	wtm.floatHistogramsAppended = append(wtm.floatHistogramsAppended, fh...)
+	return true
+}
+
+func (wtm *writeToMock) AppendScrapeEnvelope(env record.ScrapeEnvelope) bool {
+	wtm.mu.Lock()
+	defer wtm.mu.Unlock()
+
+	time.Sleep(wtm.delay)
+	wtm.scrapeEnvelopesAppends++
+	if len(env.Floats) > 0 {
+		wtm.sampleAppends++
+		wtm.samplesAppended = append(wtm.samplesAppended, env.Floats...)
+	}
+	if len(env.Histograms) > 0 {
+		wtm.histogramAppends++
+		wtm.histogramsAppended = append(wtm.histogramsAppended, env.Histograms...)
+	}
+	if len(env.FloatHistograms) > 0 {
+		wtm.floatHistogramsAppends++
+		wtm.floatHistogramsAppended = append(wtm.floatHistogramsAppended, env.FloatHistograms...)
+	}
+	if len(env.Exemplars) > 0 {
+		wtm.exemplarAppends++
+		wtm.exemplarsAppended = append(wtm.exemplarsAppended, env.Exemplars...)
+	}
+	if len(env.Metadata) > 0 {
+		wtm.metadataStores++
+		wtm.metadataStored = append(wtm.metadataStored, env.Metadata...)
+	}
 	return true
 }
 

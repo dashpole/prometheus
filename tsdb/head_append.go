@@ -1127,68 +1127,19 @@ func (a *headAppenderBase) log() error {
 		}
 	}
 	for _, b := range a.batches {
-		if len(b.metadata) > 0 {
-			rec = enc.Metadata(b.metadata, buf)
+		env := record.ScrapeEnvelope{
+			Floats:          b.floats,
+			Histograms:      b.histograms,
+			FloatHistograms: b.floatHistograms,
+			Exemplars:       exemplarsForEncoding(b.exemplars),
+			Metadata:        b.metadata,
+		}
+		if !env.IsEmpty() {
+			rec = enc.ScrapeEnvelope(env, buf)
 			buf = rec[:0]
 
 			if err := a.head.wal.Log(rec); err != nil {
-				return fmt.Errorf("log metadata: %w", err)
-			}
-		}
-		// It's important to do (float) Samples before histogram samples
-		// to end up with the correct order.
-		if len(b.floats) > 0 {
-			rec = enc.Samples(b.floats, buf)
-			buf = rec[:0]
-
-			if err := a.head.wal.Log(rec); err != nil {
-				return fmt.Errorf("log samples: %w", err)
-			}
-		}
-		if len(b.histograms) > 0 {
-			var customBucketsHistograms []record.RefHistogramSample
-			rec, customBucketsHistograms = enc.HistogramSamples(b.histograms, buf)
-			buf = rec[:0]
-			if len(rec) > 0 {
-				if err := a.head.wal.Log(rec); err != nil {
-					return fmt.Errorf("log histograms: %w", err)
-				}
-			}
-
-			if len(customBucketsHistograms) > 0 {
-				rec = enc.CustomBucketsHistogramSamples(customBucketsHistograms, buf)
-				if err := a.head.wal.Log(rec); err != nil {
-					return fmt.Errorf("log custom buckets histograms: %w", err)
-				}
-			}
-		}
-		if len(b.floatHistograms) > 0 {
-			var customBucketsFloatHistograms []record.RefFloatHistogramSample
-			rec, customBucketsFloatHistograms = enc.FloatHistogramSamples(b.floatHistograms, buf)
-			buf = rec[:0]
-			if len(rec) > 0 {
-				if err := a.head.wal.Log(rec); err != nil {
-					return fmt.Errorf("log float histograms: %w", err)
-				}
-			}
-
-			if len(customBucketsFloatHistograms) > 0 {
-				rec = enc.CustomBucketsFloatHistogramSamples(customBucketsFloatHistograms, buf)
-				if err := a.head.wal.Log(rec); err != nil {
-					return fmt.Errorf("log custom buckets float histograms: %w", err)
-				}
-			}
-		}
-		// Exemplars should be logged after samples (float/native histogram/etc),
-		// otherwise it might happen that we send the exemplars in a remote write
-		// batch before the samples, which in turn means the exemplar is rejected
-		// for missing series, since series are created due to samples.
-		if len(b.exemplars) > 0 {
-			rec = enc.Exemplars(exemplarsForEncoding(b.exemplars), buf)
-			buf = rec[:0]
-
-			if err := a.head.wal.Log(rec); err != nil {
-				return fmt.Errorf("log exemplars: %w", err)
+				return fmt.Errorf("log scrape envelope: %w", err)
 			}
 		}
 	}

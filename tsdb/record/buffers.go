@@ -26,6 +26,7 @@ type BuffersPool struct {
 	histograms      zeropool.Pool[[]RefHistogramSample]
 	floatHistograms zeropool.Pool[[]RefFloatHistogramSample]
 	metadata        zeropool.Pool[[]RefMetadata]
+	scrapeEnvelopes zeropool.Pool[*ScrapeEnvelope]
 }
 
 // NewBuffersPool returns a new BuffersPool object.
@@ -112,4 +113,20 @@ func (p *BuffersPool) GetMetadata(capacity int) []RefMetadata {
 func (p *BuffersPool) PutMetadata(b []RefMetadata) {
 	clear(b)
 	p.metadata.Put(b[:0])
+}
+
+func (p *BuffersPool) GetScrapeEnvelope() *ScrapeEnvelope {
+	env := p.scrapeEnvelopes.Get()
+	if env == nil {
+		return &ScrapeEnvelope{}
+	}
+	return env
+}
+
+func (p *BuffersPool) PutScrapeEnvelope(env *ScrapeEnvelope) {
+	if env == nil {
+		return
+	}
+	env.Reset()
+	p.scrapeEnvelopes.Put(env)
 }

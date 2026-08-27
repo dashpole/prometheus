@@ -416,6 +416,15 @@ func TestDataNotAvailableAfterRollback(t *testing.T) {
 			require.NoError(t, err)
 			walFloatHistogramCount += len(floatHistograms)
 
+		case record.ScrapeEnvelopes:
+			var env record.ScrapeEnvelope
+			_, err = dec.ScrapeEnvelope(rec, &env)
+			require.NoError(t, err)
+			walSamplesCount += len(env.Floats)
+			walExemplarsCount += len(env.Exemplars)
+			walHistogramCount += len(env.Histograms)
+			walFloatHistogramCount += len(env.FloatHistograms)
+
 		default:
 		}
 	}
@@ -4910,6 +4919,19 @@ func testOOOWALWrite(t *testing.T,
 				floatHistogramSamples, err := dec.FloatHistogramSamples(rec, nil)
 				require.NoError(t, err)
 				records = append(records, floatHistogramSamples)
+			case record.ScrapeEnvelopes:
+				var env record.ScrapeEnvelope
+				_, err := dec.ScrapeEnvelope(rec, &env)
+				require.NoError(t, err)
+				if len(env.Floats) > 0 {
+					records = append(records, env.Floats)
+				}
+				if len(env.Histograms) > 0 {
+					records = append(records, env.Histograms)
+				}
+				if len(env.FloatHistograms) > 0 {
+					records = append(records, env.FloatHistograms)
+				}
 			default:
 				t.Fatalf("got a WAL record that is not series or samples: %v", typ)
 			}

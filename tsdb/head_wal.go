@@ -244,6 +244,48 @@ func (h *Head) loadWAL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 					return
 				}
 				decoded <- meta
+			case record.ScrapeEnvelopes:
+				env := record.ScrapeEnvelope{
+					Floats:          h.wlReplaySamplesPool.Get()[:0],
+					Histograms:      h.wlReplayHistogramsPool.Get()[:0],
+					FloatHistograms: h.wlReplayFloatHistogramsPool.Get()[:0],
+					Exemplars:       h.wlReplayExemplarsPool.Get()[:0],
+					Metadata:        h.wlReplayMetadataPool.Get()[:0],
+				}
+				_, err = dec.ScrapeEnvelope(r.Record(), &env)
+				if err != nil {
+					decodeErr = &wlog.CorruptionErr{
+						Err:     fmt.Errorf("decode scrape envelope: %w", err),
+						Segment: r.Segment(),
+						Offset:  r.Offset(),
+					}
+					return
+				}
+				if len(env.Floats) > 0 {
+					decoded <- env.Floats
+				} else {
+					h.wlReplaySamplesPool.Put(env.Floats)
+				}
+				if len(env.Histograms) > 0 {
+					decoded <- env.Histograms
+				} else {
+					h.wlReplayHistogramsPool.Put(env.Histograms)
+				}
+				if len(env.FloatHistograms) > 0 {
+					decoded <- env.FloatHistograms
+				} else {
+					h.wlReplayFloatHistogramsPool.Put(env.FloatHistograms)
+				}
+				if len(env.Exemplars) > 0 {
+					decoded <- env.Exemplars
+				} else {
+					h.wlReplayExemplarsPool.Put(env.Exemplars)
+				}
+				if len(env.Metadata) > 0 {
+					decoded <- env.Metadata
+				} else {
+					h.wlReplayMetadataPool.Put(env.Metadata)
+				}
 			default:
 				// Noop.
 			}
@@ -970,6 +1012,36 @@ func (h *Head) loadWBL(r *wlog.Reader, syms *labels.SymbolTable, multiRef map[ch
 					return
 				}
 				decodedCh <- hists
+			case record.ScrapeEnvelopes:
+				env := record.ScrapeEnvelope{
+					Floats:          h.wlReplaySamplesPool.Get()[:0],
+					Histograms:      h.wlReplayHistogramsPool.Get()[:0],
+					FloatHistograms: h.wlReplayFloatHistogramsPool.Get()[:0],
+				}
+				_, err = dec.ScrapeEnvelope(rec, &env)
+				if err != nil {
+					decodeErr = &wlog.CorruptionErr{
+						Err:     fmt.Errorf("decode scrape envelope: %w", err),
+						Segment: r.Segment(),
+						Offset:  r.Offset(),
+					}
+					return
+				}
+				if len(env.Floats) > 0 {
+					decodedCh <- env.Floats
+				} else {
+					h.wlReplaySamplesPool.Put(env.Floats)
+				}
+				if len(env.Histograms) > 0 {
+					decodedCh <- env.Histograms
+				} else {
+					h.wlReplayHistogramsPool.Put(env.Histograms)
+				}
+				if len(env.FloatHistograms) > 0 {
+					decodedCh <- env.FloatHistograms
+				} else {
+					h.wlReplayFloatHistogramsPool.Put(env.FloatHistograms)
+				}
 			default:
 				// Noop.
 			}
