@@ -56,9 +56,12 @@ type WriteTo interface {
 	//
 	// Once returned, the WAL Watcher will not attempt to pass that data again.
 	Append([]record.RefSample) bool
+	AppendSamplesV2([]record.RefSampleV2) bool
 	AppendExemplars([]record.RefExemplar) bool
 	AppendHistograms([]record.RefHistogramSample) bool
+	AppendHistogramsV2([]record.RefHistogramSampleV2) bool
 	AppendFloatHistograms([]record.RefFloatHistogramSample) bool
+	AppendFloatHistogramsV2([]record.RefFloatHistogramSampleV2) bool
 	StoreSeries([]record.RefSeries, int)
 	StoreMetadata([]record.RefMetadata)
 
@@ -549,26 +552,48 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			if !tail {
 				break
 			}
-			samples, err = dec.Samples(rec, samples[:0])
-			if err != nil {
-				w.recordDecodeFailsMetric.Inc()
-				return err
-			}
-			// Reuse the underlying array for efficiency.
-			// It's valid to do, because we override elements that we no longer need to read when filtering.
-			samplesToSend := samples[:0]
-			for _, s := range samples {
-				if s.T > w.startTimestamp {
-					if !w.sendSamples {
-						w.sendSamples = true
-						duration := time.Since(w.startTime)
-						w.logger.Info("Done replaying WAL", "duration", duration)
-					}
-					samplesToSend = append(samplesToSend, s)
+			if w.sendExemplars {
+				samplesV2, err := dec.SamplesV2(rec, nil)
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
 				}
-			}
-			if len(samplesToSend) > 0 {
-				w.writer.Append(samplesToSend)
+				samplesToSend := make([]record.RefSampleV2, 0, len(samplesV2))
+				for _, s := range samplesV2 {
+					if s.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						samplesToSend = append(samplesToSend, s)
+					}
+				}
+				if len(samplesToSend) > 0 {
+					w.writer.AppendSamplesV2(samplesToSend)
+				}
+			} else {
+				samples, err = dec.Samples(rec, samples[:0])
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
+				}
+				// Reuse the underlying array for efficiency.
+				// It's valid to do, because we override elements that we no longer need to read when filtering.
+				samplesToSend := samples[:0]
+				for _, s := range samples {
+					if s.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						samplesToSend = append(samplesToSend, s)
+					}
+				}
+				if len(samplesToSend) > 0 {
+					w.writer.Append(samplesToSend)
+				}
 			}
 
 		case record.Exemplars:
@@ -596,26 +621,48 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			if !tail {
 				break
 			}
-			histograms, err = dec.HistogramSamples(rec, histograms[:0])
-			if err != nil {
-				w.recordDecodeFailsMetric.Inc()
-				return err
-			}
-			// Reuse the underlying array for efficiency.
-			// It's valid to do, because we override elements that we no longer need to read when filtering.
-			histogramsToSend := histograms[:0]
-			for _, h := range histograms {
-				if h.T > w.startTimestamp {
-					if !w.sendSamples {
-						w.sendSamples = true
-						duration := time.Since(w.startTime)
-						w.logger.Info("Done replaying WAL", "duration", duration)
-					}
-					histogramsToSend = append(histogramsToSend, h)
+			if w.sendExemplars {
+				histogramsV2, err := dec.HistogramSamplesV2(rec, nil)
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
 				}
-			}
-			if len(histogramsToSend) > 0 {
-				w.writer.AppendHistograms(histogramsToSend)
+				histogramsToSend := make([]record.RefHistogramSampleV2, 0, len(histogramsV2))
+				for _, h := range histogramsV2 {
+					if h.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						histogramsToSend = append(histogramsToSend, h)
+					}
+				}
+				if len(histogramsToSend) > 0 {
+					w.writer.AppendHistogramsV2(histogramsToSend)
+				}
+			} else {
+				histograms, err = dec.HistogramSamples(rec, histograms[:0])
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
+				}
+				// Reuse the underlying array for efficiency.
+				// It's valid to do, because we override elements that we no longer need to read when filtering.
+				histogramsToSend := histograms[:0]
+				for _, h := range histograms {
+					if h.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						histogramsToSend = append(histogramsToSend, h)
+					}
+				}
+				if len(histogramsToSend) > 0 {
+					w.writer.AppendHistograms(histogramsToSend)
+				}
 			}
 
 		case record.FloatHistogramSamples, record.CustomBucketsFloatHistogramSamples, record.FloatHistogramSamplesV2:
@@ -626,26 +673,48 @@ func (w *Watcher) readSegment(r *LiveReader, segmentNum int, tail bool) error {
 			if !tail {
 				break
 			}
-			floatHistograms, err = dec.FloatHistogramSamples(rec, floatHistograms[:0])
-			if err != nil {
-				w.recordDecodeFailsMetric.Inc()
-				return err
-			}
-			// Reuse the underlying array for efficiency.
-			// It's valid to do, because we override elements that we no longer need to read when filtering.
-			floatHistogramsToSend := floatHistograms[:0]
-			for _, fh := range floatHistograms {
-				if fh.T > w.startTimestamp {
-					if !w.sendSamples {
-						w.sendSamples = true
-						duration := time.Since(w.startTime)
-						w.logger.Info("Done replaying WAL", "duration", duration)
-					}
-					floatHistogramsToSend = append(floatHistogramsToSend, fh)
+			if w.sendExemplars {
+				floatHistogramsV2, err := dec.FloatHistogramSamplesV2(rec, nil)
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
 				}
-			}
-			if len(floatHistogramsToSend) > 0 {
-				w.writer.AppendFloatHistograms(floatHistogramsToSend)
+				floatHistogramsToSend := make([]record.RefFloatHistogramSampleV2, 0, len(floatHistogramsV2))
+				for _, fh := range floatHistogramsV2 {
+					if fh.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						floatHistogramsToSend = append(floatHistogramsToSend, fh)
+					}
+				}
+				if len(floatHistogramsToSend) > 0 {
+					w.writer.AppendFloatHistogramsV2(floatHistogramsToSend)
+				}
+			} else {
+				floatHistograms, err = dec.FloatHistogramSamples(rec, floatHistograms[:0])
+				if err != nil {
+					w.recordDecodeFailsMetric.Inc()
+					return err
+				}
+				// Reuse the underlying array for efficiency.
+				// It's valid to do, because we override elements that we no longer need to read when filtering.
+				floatHistogramsToSend := floatHistograms[:0]
+				for _, fh := range floatHistograms {
+					if fh.T > w.startTimestamp {
+						if !w.sendSamples {
+							w.sendSamples = true
+							duration := time.Since(w.startTime)
+							w.logger.Info("Done replaying WAL", "duration", duration)
+						}
+						floatHistogramsToSend = append(floatHistogramsToSend, fh)
+					}
+				}
+				if len(floatHistogramsToSend) > 0 {
+					w.writer.AppendFloatHistograms(floatHistogramsToSend)
+				}
 			}
 
 		case record.Metadata:

@@ -5218,3 +5218,254 @@ func TestHeadAppenderV2_Histogram_STStorage(t *testing.T) {
 		})
 	}
 }
+
+func TestHeadAppenderV2_CompoundWALRecordsAndExemplarDualWrite(t *testing.T) {
+	opts := DefaultHeadOptions()
+	opts.ChunkRange = 100000
+	opts.ChunkDirRoot = t.TempDir()
+	opts.EnableExemplarStorage = true
+	opts.MaxExemplars.Store(1000)
+
+	h, w := newTestHeadWithOptions(t, compression.None, opts)
+	defer func() {
+		require.NoError(t, h.Close())
+	}()
+
+	app := h.AppenderV2(context.Background())
+
+	lsetFloat := labels.FromStrings("__name__", "http_requests_total", "job", "api")
+	lsetHisto := labels.FromStrings("__name__", "http_request_duration_seconds", "job", "api")
+	lsetFloatHisto := labels.FromStrings("__name__", "http_request_duration_float_seconds", "job", "api")
+
+	hSample := &histogram.Histogram{
+		Schema:          1,
+		Count:           10,
+		Sum:             2.5,
+		ZeroCount:       1,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+		PositiveBuckets: []int64{9},
+	}
+
+	fhSample := &histogram.FloatHistogram{
+		Schema:          1,
+		Count:           10.0,
+		Sum:             2.5,
+		ZeroCount:       1.0,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 1}},
+		PositiveBuckets: []float64{9.0},
+	}
+
+	ex1 := exemplar.Exemplar{Ts: 1000, Value: 1.0, Labels: labels.FromStrings("trace_id", "trace-float-1")}
+	ex2 := exemplar.Exemplar{Ts: 1000, Value: 2.5, Labels: labels.FromStrings("trace_id", "trace-histo-1")}
+	ex3 := exemplar.Exemplar{Ts: 1000, Value: 2.5, Labels: labels.FromStrings("trace_id", "trace-floathisto-1")}
+
+	// Append float sample with exemplar
+	_, err := app.Append(0, lsetFloat, 0, 1000, 1.0, nil, nil, storage.AOptions{
+		Exemplars: []exemplar.Exemplar{ex1},
+	})
+	require.NoError(t, err)
+
+	// Append histogram sample with exemplar
+	_, err = app.Append(0, lsetHisto, 0, 1000, 0, hSample, nil, storage.AOptions{
+		Exemplars: []exemplar.Exemplar{ex2},
+	})
+	require.NoError(t, err)
+
+	// Append float histogram sample with exemplar
+	_, err = app.Append(0, lsetFloatHisto, 0, 1000, 0, nil, fhSample, storage.AOptions{
+		Exemplars: []exemplar.Exemplar{ex3},
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, app.Commit())
+
+	// 1. Verify ExemplarStorage (PromQL query invariant)
+	exQuerier, err := h.ExemplarQuerier(context.Background())
+	require.NoError(t, err)
+
+	res, err := exQuerier.Select(0, 2000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "http_requests_total")})
+	require.NoError(t, err)
+	require.Len(t, res, 1)
+	require.Len(t, res[0].Exemplars, 1)
+	require.Equal(t, ex1.Labels.Map(), res[0].Exemplars[0].Labels.Map())
+	require.Equal(t, ex1.Value, res[0].Exemplars[0].Value)
+
+	// 2. Verify WAL Compound Record Encoding
+	sr, err := wlog.NewSegmentsReader(w.Dir())
+	require.NoError(t, err)
+	defer func() { require.NoError(t, sr.Close()) }()
+
+	dec := record.NewDecoder(labels.NewSymbolTable(), nil)
+	r := wlog.NewReader(sr)
+
+	var foundSampleV2, foundHistoV2, foundFloatHistoV2 bool
+	for r.Next() {
+		rec := r.Record()
+		switch dec.Type(rec) {
+		case record.SamplesV2:
+			samples, err := dec.SamplesV2(rec, nil)
+			require.NoError(t, err)
+			for _, s := range samples {
+				if len(s.Exemplars) > 0 {
+					foundSampleV2 = true
+					require.Equal(t, "trace-float-1", s.Exemplars[0].Labels.Get("trace_id"))
+				}
+			}
+		case record.HistogramSamplesV2:
+			hists, err := dec.HistogramSamplesV2(rec, nil)
+			require.NoError(t, err)
+			for _, h := range hists {
+				if len(h.Exemplars) > 0 {
+					foundHistoV2 = true
+					require.Equal(t, "trace-histo-1", h.Exemplars[0].Labels.Get("trace_id"))
+				}
+			}
+		case record.FloatHistogramSamplesV2:
+			fhists, err := dec.FloatHistogramSamplesV2(rec, nil)
+			require.NoError(t, err)
+			for _, fh := range fhists {
+				if len(fh.Exemplars) > 0 {
+					foundFloatHistoV2 = true
+					require.Equal(t, "trace-floathisto-1", fh.Exemplars[0].Labels.Get("trace_id"))
+				}
+			}
+		}
+	}
+	require.NoError(t, r.Err())
+	require.True(t, foundSampleV2, "expected SamplesV2 record with attached exemplar in WAL")
+	require.True(t, foundHistoV2, "expected HistogramSamplesV2 record with attached exemplar in WAL")
+	require.True(t, foundFloatHistoV2, "expected FloatHistogramSamplesV2 record with attached exemplar in WAL")
+}
+
+func TestHeadAppenderV2_RollbackRemovesStagedExemplars(t *testing.T) {
+	opts := DefaultHeadOptions()
+	opts.ChunkRange = 100000
+	opts.ChunkDirRoot = t.TempDir()
+	opts.EnableExemplarStorage = true
+	opts.MaxExemplars.Store(1000)
+
+	h, _ := newTestHeadWithOptions(t, compression.None, opts)
+	defer func() {
+		require.NoError(t, h.Close())
+	}()
+
+	app := h.AppenderV2(context.Background())
+	lset := labels.FromStrings("__name__", "rollback_metric", "job", "test")
+	ex := exemplar.Exemplar{Ts: 1000, Value: 42.0, Labels: labels.FromStrings("trace_id", "rb-1")}
+
+	_, err := app.Append(0, lset, 0, 1000, 42.0, nil, nil, storage.AOptions{
+		Exemplars: []exemplar.Exemplar{ex},
+	})
+	require.NoError(t, err)
+
+	// Rollback
+	require.NoError(t, app.Rollback())
+
+	// Verify ExemplarStorage contains no exemplars
+	exQuerier, err := h.ExemplarQuerier(context.Background())
+	require.NoError(t, err)
+	res, err := exQuerier.Select(0, 2000, []*labels.Matcher{labels.MustNewMatcher(labels.MatchEqual, "__name__", "rollback_metric")})
+	require.NoError(t, err)
+	require.Empty(t, res)
+}
+
+func TestHead_MixedVersionWALReplay(t *testing.T) {
+	dir := t.TempDir()
+	walDir := filepath.Join(dir, "wal")
+	w, err := wlog.NewSize(nil, nil, walDir, 32768, compression.None)
+	require.NoError(t, err)
+
+	var enc record.Encoder
+
+	// 1. Series records
+	series := []record.RefSeries{
+		{Ref: 1, Labels: labels.FromStrings("__name__", "v1_series", "job", "test")},
+		{Ref: 2, Labels: labels.FromStrings("__name__", "v2_series", "job", "test")},
+	}
+	require.NoError(t, w.Log(enc.Series(series, nil)))
+
+	// 2. V1 Samples record
+	v1Samples := []record.RefSample{
+		{Ref: 1, T: 1000, V: 10.0},
+		{Ref: 1, T: 2000, V: 20.0},
+	}
+	require.NoError(t, w.Log(enc.Samples(v1Samples, nil)))
+
+	// 3. V1 Exemplars record
+	v1Exemplars := []record.RefExemplar{
+		{Ref: 1, T: 1000, V: 10.0, Labels: labels.FromStrings("trace_id", "v1_trace")},
+	}
+	require.NoError(t, w.Log(enc.Exemplars(v1Exemplars, nil)))
+
+	// 4. V2 Samples record (with compound exemplar)
+	v2Samples := []record.RefSampleV2{
+		{
+			Ref: 2, T: 1000, V: 100.0,
+			Exemplars: []record.RefExemplar{
+				{Ref: 2, T: 1000, V: 100.0, Labels: labels.FromStrings("trace_id", "v2_trace")},
+			},
+		},
+		{
+			Ref: 2, T: 2000, V: 200.0,
+		},
+	}
+	require.NoError(t, w.Log(enc.SamplesV2(v2Samples, nil)))
+
+	require.NoError(t, w.Close())
+
+	// Replay into Head
+	opts := DefaultHeadOptions()
+	opts.ChunkRange = 100000
+	opts.ChunkDirRoot = dir
+	opts.EnableExemplarStorage = true
+	opts.MaxExemplars.Store(1000)
+
+	wal, err := wlog.NewSize(nil, nil, walDir, 32768, compression.None)
+	require.NoError(t, err)
+
+	h, err := NewHead(nil, nil, wal, nil, opts, nil)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, h.Close())
+	}()
+
+	require.NoError(t, h.Init(0))
+
+	// Verify both series and samples are loaded
+	q, err := NewBlockQuerier(h, 0, 3000)
+	require.NoError(t, err)
+	defer q.Close()
+
+	// Query V1 series
+	ss1 := q.Select(context.Background(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "v1_series"))
+	require.True(t, ss1.Next())
+	s1 := ss1.At()
+	it1 := s1.Iterator(nil)
+	require.Equal(t, chunkenc.ValFloat, it1.Next())
+	t1, v1 := it1.At()
+	require.Equal(t, int64(1000), t1)
+	require.Equal(t, 10.0, v1)
+	require.Equal(t, chunkenc.ValFloat, it1.Next())
+	t2, v2 := it1.At()
+	require.Equal(t, int64(2000), t2)
+	require.Equal(t, 20.0, v2)
+	require.Equal(t, chunkenc.ValNone, it1.Next())
+
+	// Query V2 series
+	ss2 := q.Select(context.Background(), false, nil, labels.MustNewMatcher(labels.MatchEqual, "__name__", "v2_series"))
+	require.True(t, ss2.Next())
+	s2 := ss2.At()
+	it2 := s2.Iterator(nil)
+	require.Equal(t, chunkenc.ValFloat, it2.Next())
+	t3, v3 := it2.At()
+	require.Equal(t, int64(1000), t3)
+	require.Equal(t, 100.0, v3)
+	require.Equal(t, chunkenc.ValFloat, it2.Next())
+	t4, v4 := it2.At()
+	require.Equal(t, int64(2000), t4)
+	require.Equal(t, 200.0, v4)
+	require.Equal(t, chunkenc.ValNone, it2.Next())
+}
+

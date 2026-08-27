@@ -374,29 +374,35 @@ const (
 // because it is unclear if it is needed at all. (Maybe we will remove metadata
 // records altogether, see issue #15911.)
 type appendBatch struct {
-	floats               []record.RefSample               // New float samples held by this appender.
-	floatSeries          []*memSeries                     // Float series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
-	histograms           []record.RefHistogramSample      // New histogram samples held by this appender.
-	histogramSeries      []*memSeries                     // HistogramSamples series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
-	floatHistograms      []record.RefFloatHistogramSample // New float histogram samples held by this appender.
-	floatHistogramSeries []*memSeries                     // FloatHistogramSamples series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
-	metadata             []record.RefMetadata             // New metadata held by this appender.
-	metadataSeries       []*memSeries                     // Series corresponding to the metadata held by this appender.
-	exemplars            []exemplarWithSeriesRef          // New exemplars held by this appender.
+	floats               []record.RefSample                 // New float samples held by this appender.
+	floatsV2             []record.RefSampleV2               // New V2 float samples with attached exemplars.
+	floatSeries          []*memSeries                       // Float series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
+	histograms           []record.RefHistogramSample        // New histogram samples held by this appender.
+	histogramsV2         []record.RefHistogramSampleV2      // New V2 histogram samples with attached exemplars.
+	histogramSeries      []*memSeries                       // HistogramSamples series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
+	floatHistograms      []record.RefFloatHistogramSample   // New float histogram samples held by this appender.
+	floatHistogramsV2    []record.RefFloatHistogramSampleV2 // New V2 float histogram samples with attached exemplars.
+	floatHistogramSeries []*memSeries                       // FloatHistogramSamples series corresponding to the samples held by this appender (using corresponding slice indices - same series may appear more than once).
+	metadata             []record.RefMetadata               // New metadata held by this appender.
+	metadataSeries       []*memSeries                       // Series corresponding to the metadata held by this appender.
+	exemplars            []exemplarWithSeriesRef            // New exemplars held by this appender.
 }
 
 // close returns all the slices to the pools in Head and nil's them.
 func (b *appendBatch) close(h *Head) {
 	h.putFloatBuffer(b.floats)
 	b.floats = nil
+	b.floatsV2 = nil
 	h.putSeriesBuffer(b.floatSeries)
 	b.floatSeries = nil
 	h.putHistogramBuffer(b.histograms)
 	b.histograms = nil
+	b.histogramsV2 = nil
 	h.putSeriesBuffer(b.histogramSeries)
 	b.histogramSeries = nil
 	h.putFloatHistogramBuffer(b.floatHistograms)
 	b.floatHistograms = nil
+	b.floatHistogramsV2 = nil
 	h.putSeriesBuffer(b.floatHistogramSeries)
 	b.floatHistogramSeries = nil
 	h.putMetadataBuffer(b.metadata)
@@ -1137,7 +1143,22 @@ func (a *headAppenderBase) log() error {
 		}
 		// It's important to do (float) Samples before histogram samples
 		// to end up with the correct order.
-		if len(b.floats) > 0 {
+		if len(b.floatsV2) > 0 {
+			if a.storeST || hasExemplarsFloats(b.floatsV2) {
+				rec = enc.SamplesV2(b.floatsV2, buf)
+			} else {
+				v1Samples := make([]record.RefSample, len(b.floatsV2))
+				for i, s := range b.floatsV2 {
+					v1Samples[i] = record.RefSample{Ref: s.Ref, ST: s.ST, T: s.T, V: s.V}
+				}
+				rec = enc.Samples(v1Samples, buf)
+			}
+			buf = rec[:0]
+
+			if err := a.head.wal.Log(rec); err != nil {
+				return fmt.Errorf("log samples: %w", err)
+			}
+		} else if len(b.floats) > 0 {
 			rec = enc.Samples(b.floats, buf)
 			buf = rec[:0]
 
@@ -1145,7 +1166,37 @@ func (a *headAppenderBase) log() error {
 				return fmt.Errorf("log samples: %w", err)
 			}
 		}
-		if len(b.histograms) > 0 {
+		if len(b.histogramsV2) > 0 {
+			if a.storeST || hasExemplarsHistograms(b.histogramsV2) {
+				rec = enc.HistogramSamplesV2(b.histogramsV2, buf)
+				buf = rec[:0]
+				if len(rec) > 0 {
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log histograms v2: %w", err)
+					}
+				}
+			} else {
+				v1Histograms := make([]record.RefHistogramSample, len(b.histogramsV2))
+				for i, h := range b.histogramsV2 {
+					v1Histograms[i] = record.RefHistogramSample{Ref: h.Ref, ST: h.ST, T: h.T, H: h.H}
+				}
+				var customBucketsHistograms []record.RefHistogramSample
+				rec, customBucketsHistograms = enc.HistogramSamples(v1Histograms, buf)
+				buf = rec[:0]
+				if len(rec) > 0 {
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log histograms: %w", err)
+					}
+				}
+
+				if len(customBucketsHistograms) > 0 {
+					rec = enc.CustomBucketsHistogramSamples(customBucketsHistograms, buf)
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log custom buckets histograms: %w", err)
+					}
+				}
+			}
+		} else if len(b.histograms) > 0 {
 			var customBucketsHistograms []record.RefHistogramSample
 			rec, customBucketsHistograms = enc.HistogramSamples(b.histograms, buf)
 			buf = rec[:0]
@@ -1162,7 +1213,37 @@ func (a *headAppenderBase) log() error {
 				}
 			}
 		}
-		if len(b.floatHistograms) > 0 {
+		if len(b.floatHistogramsV2) > 0 {
+			if a.storeST || hasExemplarsFloatHistograms(b.floatHistogramsV2) {
+				rec = enc.FloatHistogramSamplesV2(b.floatHistogramsV2, buf)
+				buf = rec[:0]
+				if len(rec) > 0 {
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log float histograms v2: %w", err)
+					}
+				}
+			} else {
+				v1FloatHistograms := make([]record.RefFloatHistogramSample, len(b.floatHistogramsV2))
+				for i, fh := range b.floatHistogramsV2 {
+					v1FloatHistograms[i] = record.RefFloatHistogramSample{Ref: fh.Ref, ST: fh.ST, T: fh.T, FH: fh.FH}
+				}
+				var customBucketsFloatHistograms []record.RefFloatHistogramSample
+				rec, customBucketsFloatHistograms = enc.FloatHistogramSamples(v1FloatHistograms, buf)
+				buf = rec[:0]
+				if len(rec) > 0 {
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log float histograms: %w", err)
+					}
+				}
+
+				if len(customBucketsFloatHistograms) > 0 {
+					rec = enc.CustomBucketsFloatHistogramSamples(customBucketsFloatHistograms, buf)
+					if err := a.head.wal.Log(rec); err != nil {
+						return fmt.Errorf("log custom buckets float histograms: %w", err)
+					}
+				}
+			}
+		} else if len(b.floatHistograms) > 0 {
 			var customBucketsFloatHistograms []record.RefFloatHistogramSample
 			rec, customBucketsFloatHistograms = enc.FloatHistogramSamples(b.floatHistograms, buf)
 			buf = rec[:0]
@@ -1183,7 +1264,8 @@ func (a *headAppenderBase) log() error {
 		// otherwise it might happen that we send the exemplars in a remote write
 		// batch before the samples, which in turn means the exemplar is rejected
 		// for missing series, since series are created due to samples.
-		if len(b.exemplars) > 0 {
+		// For compound V2 records, exemplars are already coupled in the sample records.
+		if len(b.floatsV2) == 0 && len(b.histogramsV2) == 0 && len(b.floatHistogramsV2) == 0 && len(b.exemplars) > 0 {
 			rec = enc.Exemplars(exemplarsForEncoding(b.exemplars), buf)
 			buf = rec[:0]
 
@@ -1193,6 +1275,33 @@ func (a *headAppenderBase) log() error {
 		}
 	}
 	return nil
+}
+
+func hasExemplarsFloats(samples []record.RefSampleV2) bool {
+	for _, s := range samples {
+		if len(s.Exemplars) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExemplarsHistograms(samples []record.RefHistogramSampleV2) bool {
+	for _, s := range samples {
+		if len(s.Exemplars) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasExemplarsFloatHistograms(samples []record.RefFloatHistogramSampleV2) bool {
+	for _, s := range samples {
+		if len(s.Exemplars) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func exemplarsForEncoding(es []exemplarWithSeriesRef) []record.RefExemplar {
@@ -1365,6 +1474,114 @@ func handleAppendableError(err error, appended, oooRejected, oobRejected, tooOld
 //
 // There are also specific functions to commit histograms and float histograms.
 func (a *headAppenderBase) commitFloats(b *appendBatch, acc *appenderCommitContext) {
+	if len(b.floatsV2) > 0 {
+		var ok, chunkCreated bool
+		var series *memSeries
+
+		for i, s := range b.floatsV2 {
+			series = b.floatSeries[i]
+			series.Lock()
+
+			if value.IsStaleNaN(s.V) {
+				switch {
+				case series.lastHistogramValue != nil:
+					b.histogramsV2 = append(b.histogramsV2, record.RefHistogramSampleV2{
+						Ref: series.ref,
+						ST:  s.ST,
+						T:   s.T,
+						H:   &histogram.Histogram{Sum: s.V},
+					})
+					b.histogramSeries = append(b.histogramSeries, series)
+					acc.floatsAppended--
+					acc.histogramsAppended++
+					series.Unlock()
+					continue
+				case series.lastFloatHistogramValue != nil:
+					b.floatHistogramsV2 = append(b.floatHistogramsV2, record.RefFloatHistogramSampleV2{
+						Ref: series.ref,
+						ST:  s.ST,
+						T:   s.T,
+						FH:  &histogram.FloatHistogram{Sum: s.V},
+					})
+					b.floatHistogramSeries = append(b.floatHistogramSeries, series)
+					acc.floatsAppended--
+					acc.histogramsAppended++
+					series.Unlock()
+					continue
+				}
+			}
+			oooSample, _, err := series.appendable(s.T, s.V, a.headMaxt, a.minValidTime, a.oooTimeWindow)
+			if err != nil {
+				handleAppendableError(err, &acc.floatsAppended, &acc.floatOOORejected, &acc.floatOOBRejected, &acc.floatTooOldRejected)
+			}
+
+			prevHeadChunkCount := series.headChunkCount.Load()
+			switch {
+			case err != nil:
+				// Do nothing here.
+			case oooSample:
+				var mmapRefs []chunks.ChunkDiskMapperRef
+				ok, chunkCreated, mmapRefs = series.insert(s.ST, s.T, s.V, nil, nil, acc.appendChunkOpts, acc.oooCapMax, a.head.logger)
+				if chunkCreated {
+					r, ok := acc.oooMmapMarkers[series.ref]
+					if !ok || r != nil {
+						acc.collectOOORecords(a)
+					}
+
+					if acc.oooMmapMarkers == nil {
+						acc.oooMmapMarkers = make(map[chunks.HeadSeriesRef][]chunks.ChunkDiskMapperRef)
+					}
+					if len(mmapRefs) > 0 {
+						acc.oooMmapMarkers[series.ref] = mmapRefs
+						acc.oooMmapMarkersCount += len(mmapRefs)
+					} else {
+						acc.oooMmapMarkers[series.ref] = []chunks.ChunkDiskMapperRef{0}
+						acc.oooMmapMarkersCount++
+					}
+				}
+				if ok {
+					acc.wblSamples = append(acc.wblSamples, record.RefSample{Ref: s.Ref, ST: s.ST, T: s.T, V: s.V})
+					if s.T < acc.oooMinT {
+						acc.oooMinT = s.T
+					}
+					if s.T > acc.oooMaxT {
+						acc.oooMaxT = s.T
+					}
+					acc.oooFloatsAccepted++
+				} else {
+					acc.floatsAppended--
+				}
+			default:
+				wasStale, wasHistogram, oldBuckets := series.sampleState()
+				isStale := value.IsStaleNaN(s.V)
+				ok, chunkCreated = series.append(s.ST, s.T, s.V, a.appendID, acc.appendChunkOpts)
+				if ok {
+					if s.T < acc.inOrderMint {
+						acc.inOrderMint = s.T
+					}
+					if s.T > acc.inOrderMaxt {
+						acc.inOrderMaxt = s.T
+					}
+					a.head.updateStaleSeriesMetricOnAppend(wasStale, isStale)
+					if wasHistogram {
+						a.head.updateNativeHistogramMetricsOnAppend(true, false, oldBuckets, 0)
+					}
+				} else {
+					acc.floatsAppended--
+				}
+			}
+
+			if chunkCreated {
+				a.head.onChunkCreated(series, prevHeadChunkCount)
+			}
+
+			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
+			a.releasePendingCommit(series)
+			series.Unlock()
+		}
+		return
+	}
+
 	var ok, chunkCreated bool
 	var series *memSeries
 
@@ -1521,6 +1738,86 @@ func (a *headAppenderBase) commitFloats(b *appendBatch, acc *appenderCommitConte
 
 // For details on the commitHistograms function, see the commitFloats docs.
 func (a *headAppenderBase) commitHistograms(b *appendBatch, acc *appenderCommitContext) {
+	if len(b.histogramsV2) > 0 {
+		var ok, chunkCreated bool
+		var series *memSeries
+
+		for i, s := range b.histogramsV2 {
+			series = b.histogramSeries[i]
+			series.Lock()
+
+			oooSample, _, err := series.appendableHistogram(s.T, s.H, a.headMaxt, a.minValidTime, a.oooTimeWindow)
+			if err != nil {
+				handleAppendableError(err, &acc.histogramsAppended, &acc.histoOOORejected, &acc.histoOOBRejected, &acc.histoTooOldRejected)
+			}
+
+			prevHeadChunkCount := series.headChunkCount.Load()
+			switch {
+			case err != nil:
+				// Do nothing here.
+			case oooSample:
+				var mmapRefs []chunks.ChunkDiskMapperRef
+				ok, chunkCreated, mmapRefs = series.insert(s.ST, s.T, 0, s.H, nil, acc.appendChunkOpts, acc.oooCapMax, a.head.logger)
+				if chunkCreated {
+					r, ok := acc.oooMmapMarkers[series.ref]
+					if !ok || r != nil {
+						acc.collectOOORecords(a)
+					}
+
+					if acc.oooMmapMarkers == nil {
+						acc.oooMmapMarkers = make(map[chunks.HeadSeriesRef][]chunks.ChunkDiskMapperRef)
+					}
+					if len(mmapRefs) > 0 {
+						acc.oooMmapMarkers[series.ref] = mmapRefs
+						acc.oooMmapMarkersCount += len(mmapRefs)
+					} else {
+						acc.oooMmapMarkers[series.ref] = []chunks.ChunkDiskMapperRef{0}
+						acc.oooMmapMarkersCount++
+					}
+				}
+				if ok {
+					acc.wblHistograms = append(acc.wblHistograms, record.RefHistogramSample{Ref: s.Ref, ST: s.ST, T: s.T, H: s.H})
+					if s.T < acc.oooMinT {
+						acc.oooMinT = s.T
+					}
+					if s.T > acc.oooMaxT {
+						acc.oooMaxT = s.T
+					}
+					acc.oooHistogramAccepted++
+				} else {
+					acc.histogramsAppended--
+				}
+			default:
+				wasStale, wasHistogram, oldBuckets := series.sampleState()
+				isStale := value.IsStaleNaN(s.H.Sum)
+				newBuckets := len(s.H.PositiveBuckets) + len(s.H.NegativeBuckets)
+				ok, chunkCreated = series.appendHistogram(s.ST, s.T, s.H, a.appendID, acc.appendChunkOpts)
+				if ok {
+					if s.T < acc.inOrderMint {
+						acc.inOrderMint = s.T
+					}
+					if s.T > acc.inOrderMaxt {
+						acc.inOrderMaxt = s.T
+					}
+					a.head.updateStaleSeriesMetricOnAppend(wasStale, isStale)
+					a.head.updateNativeHistogramMetricsOnAppend(wasHistogram, true, oldBuckets, newBuckets)
+				} else {
+					acc.histogramsAppended--
+					acc.histoOOORejected++
+				}
+			}
+
+			if chunkCreated {
+				a.head.onChunkCreated(series, prevHeadChunkCount)
+			}
+
+			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
+			a.releasePendingCommit(series)
+			series.Unlock()
+		}
+		return
+	}
+
 	var ok, chunkCreated bool
 	var series *memSeries
 
@@ -1623,6 +1920,86 @@ func (a *headAppenderBase) commitHistograms(b *appendBatch, acc *appenderCommitC
 
 // For details on the commitFloatHistograms function, see the commitFloats docs.
 func (a *headAppenderBase) commitFloatHistograms(b *appendBatch, acc *appenderCommitContext) {
+	if len(b.floatHistogramsV2) > 0 {
+		var ok, chunkCreated bool
+		var series *memSeries
+
+		for i, s := range b.floatHistogramsV2 {
+			series = b.floatHistogramSeries[i]
+			series.Lock()
+
+			oooSample, _, err := series.appendableFloatHistogram(s.T, s.FH, a.headMaxt, a.minValidTime, a.oooTimeWindow)
+			if err != nil {
+				handleAppendableError(err, &acc.histogramsAppended, &acc.histoOOORejected, &acc.histoOOBRejected, &acc.histoTooOldRejected)
+			}
+
+			prevHeadChunkCount := series.headChunkCount.Load()
+			switch {
+			case err != nil:
+				// Do nothing here.
+			case oooSample:
+				var mmapRefs []chunks.ChunkDiskMapperRef
+				ok, chunkCreated, mmapRefs = series.insert(s.ST, s.T, 0, nil, s.FH, acc.appendChunkOpts, acc.oooCapMax, a.head.logger)
+				if chunkCreated {
+					r, ok := acc.oooMmapMarkers[series.ref]
+					if !ok || r != nil {
+						acc.collectOOORecords(a)
+					}
+
+					if acc.oooMmapMarkers == nil {
+						acc.oooMmapMarkers = make(map[chunks.HeadSeriesRef][]chunks.ChunkDiskMapperRef)
+					}
+					if len(mmapRefs) > 0 {
+						acc.oooMmapMarkers[series.ref] = mmapRefs
+						acc.oooMmapMarkersCount += len(mmapRefs)
+					} else {
+						acc.oooMmapMarkers[series.ref] = []chunks.ChunkDiskMapperRef{0}
+						acc.oooMmapMarkersCount++
+					}
+				}
+				if ok {
+					acc.wblFloatHistograms = append(acc.wblFloatHistograms, record.RefFloatHistogramSample{Ref: s.Ref, ST: s.ST, T: s.T, FH: s.FH})
+					if s.T < acc.oooMinT {
+						acc.oooMinT = s.T
+					}
+					if s.T > acc.oooMaxT {
+						acc.oooMaxT = s.T
+					}
+					acc.oooHistogramAccepted++
+				} else {
+					acc.histogramsAppended--
+				}
+			default:
+				wasStale, wasHistogram, oldBuckets := series.sampleState()
+				isStale := value.IsStaleNaN(s.FH.Sum)
+				newBuckets := len(s.FH.PositiveBuckets) + len(s.FH.NegativeBuckets)
+				ok, chunkCreated = series.appendFloatHistogram(s.ST, s.T, s.FH, a.appendID, acc.appendChunkOpts)
+				if ok {
+					if s.T < acc.inOrderMint {
+						acc.inOrderMint = s.T
+					}
+					if s.T > acc.inOrderMaxt {
+						acc.inOrderMaxt = s.T
+					}
+					a.head.updateStaleSeriesMetricOnAppend(wasStale, isStale)
+					a.head.updateNativeHistogramMetricsOnAppend(wasHistogram, true, oldBuckets, newBuckets)
+				} else {
+					acc.histogramsAppended--
+					acc.histoOOORejected++
+				}
+			}
+
+			if chunkCreated {
+				a.head.onChunkCreated(series, prevHeadChunkCount)
+			}
+
+			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
+			a.releasePendingCommit(series)
+			series.Unlock()
+		}
+		return
+	}
+
 	var ok, chunkCreated bool
 	var series *memSeries
 
@@ -1807,8 +2184,8 @@ func (a *headAppenderBase) Commit() (err error) {
 	}
 
 	for _, b := range a.batches {
-		acc.floatsAppended += len(b.floats)
-		acc.histogramsAppended += len(b.histograms) + len(b.floatHistograms)
+		acc.floatsAppended += len(b.floats) + len(b.floatsV2)
+		acc.histogramsAppended += len(b.histograms) + len(b.histogramsV2) + len(b.floatHistograms) + len(b.floatHistogramsV2)
 		a.commitExemplars(b)
 		defer b.close(h)
 	}
@@ -2312,24 +2689,20 @@ func (a *headAppenderBase) Rollback() (err error) {
 		h.putTypeMap(a.typesInBatch)
 	}()
 
-	var series *memSeries
 	for _, b := range a.batches {
-		for i := range b.floats {
-			series = b.floatSeries[i]
+		for _, series := range b.floatSeries {
 			series.Lock()
 			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
 			a.releasePendingCommit(series)
 			series.Unlock()
 		}
-		for i := range b.histograms {
-			series = b.histogramSeries[i]
+		for _, series := range b.histogramSeries {
 			series.Lock()
 			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
 			a.releasePendingCommit(series)
 			series.Unlock()
 		}
-		for i := range b.floatHistograms {
-			series = b.floatHistogramSeries[i]
+		for _, series := range b.floatHistogramSeries {
 			series.Lock()
 			series.cleanupAppendIDsBelow(a.cleanupAppendIDsBelow)
 			a.releasePendingCommit(series)

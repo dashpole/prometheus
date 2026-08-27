@@ -2808,3 +2808,97 @@ func TestAppendHistogramsWithStartTimestamp(t *testing.T) {
 
 	c.waitForExpectedData(t, 30*time.Second)
 }
+
+func TestQueueManager_PRW2_ExemplarAttachment(t *testing.T) {
+	lbls := labels.FromStrings("__name__", "http_requests_total", "job", "api")
+	ex1 := record.RefExemplar{
+		Ref:    1,
+		T:      1000,
+		V:      42.0,
+		Labels: labels.FromStrings("trace_id", "abc-123"),
+	}
+	ex2 := record.RefExemplar{
+		Ref:    1,
+		T:      2000,
+		V:      43.0,
+		Labels: labels.FromStrings("trace_id", "def-456"),
+	}
+
+	batch := []timeSeries{
+		{
+			seriesLabels:   lbls,
+			value:          42.0,
+			timestamp:      1000,
+			startTimestamp: 500,
+			exemplars:      []record.RefExemplar{ex1},
+			sType:          tSample,
+		},
+		{
+			seriesLabels:   lbls,
+			value:          43.0,
+			timestamp:      2000,
+			startTimestamp: 500,
+			exemplars:      []record.RefExemplar{ex2},
+			sType:          tSample,
+		},
+	}
+
+	symbolTable := writev2.NewSymbolTable()
+	pendingData := make([]writev2.TimeSeries, len(batch))
+
+	nSamples, nExemplars, nHistograms, _, _ := populateV2TimeSeries(&symbolTable, batch, pendingData, true, true, false)
+
+	require.Equal(t, 2, nSamples)
+	require.Equal(t, 2, nExemplars)
+	require.Equal(t, 0, nHistograms)
+
+	// Verify each time series has BOTH sample AND attached exemplar
+	for i, ts := range pendingData {
+		require.Len(t, ts.Samples, 1, "expected 1 sample on series %d", i)
+		require.Len(t, ts.Exemplars, 1, "expected 1 exemplar attached to series %d", i)
+		require.Equal(t, batch[i].value, ts.Samples[0].Value)
+		require.Equal(t, batch[i].timestamp, ts.Samples[0].Timestamp)
+		require.Equal(t, batch[i].exemplars[0].V, ts.Exemplars[0].Value)
+	}
+
+	// Verify invariant: NO standalone exemplar series (series with 0 samples/histograms and > 0 exemplars)
+	for i, ts := range pendingData {
+		if len(ts.Exemplars) > 0 {
+			require.True(t, len(ts.Samples) > 0 || len(ts.Histograms) > 0, "series %d has exemplars but 0 samples/histograms", i)
+		}
+	}
+}
+
+func TestQueueManager_PRW1_ExemplarAttachment(t *testing.T) {
+	lbls := labels.FromStrings("__name__", "http_requests_total", "job", "api")
+	ex1 := record.RefExemplar{
+		Ref:    1,
+		T:      1000,
+		V:      42.0,
+		Labels: labels.FromStrings("trace_id", "abc-123"),
+	}
+
+	batch := []timeSeries{
+		{
+			seriesLabels:   lbls,
+			value:          42.0,
+			timestamp:      1000,
+			startTimestamp: 500,
+			exemplars:      []record.RefExemplar{ex1},
+			sType:          tSample,
+		},
+	}
+
+	pendingData := make([]prompb.TimeSeries, len(batch))
+	nSamples, nExemplars, nHistograms := populateTimeSeries(batch, pendingData, true, true)
+
+	require.Equal(t, 1, nSamples)
+	require.Equal(t, 1, nExemplars)
+	require.Equal(t, 0, nHistograms)
+
+	require.Len(t, pendingData[0].Samples, 1)
+	require.Len(t, pendingData[0].Exemplars, 1)
+	require.Equal(t, 42.0, pendingData[0].Samples[0].Value)
+	require.Equal(t, 42.0, pendingData[0].Exemplars[0].Value)
+	require.Equal(t, int64(1000), pendingData[0].Exemplars[0].Timestamp)
+}

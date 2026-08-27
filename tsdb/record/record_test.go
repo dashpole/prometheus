@@ -1384,3 +1384,357 @@ func BenchmarkDecodeHistogramSamples(b *testing.B) {
 		}
 	}
 }
+
+func TestRefSamplesV2(t *testing.T) {
+	dec := NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+	var enc Encoder
+
+	testCases := []struct {
+		name    string
+		samples []RefSampleV2
+	}{
+		{
+			name: "zero exemplars",
+			samples: []RefSampleV2{
+				{Ref: 1, ST: 100, T: 1000, V: 42.5},
+				{Ref: 2, ST: 100, T: 1000, V: 43.5},
+				{Ref: 3, ST: 200, T: 1010, V: 44.5},
+			},
+		},
+		{
+			name: "single exemplar per sample",
+			samples: []RefSampleV2{
+				{
+					Ref: 10, ST: 0, T: 5000, V: 100.1,
+					Exemplars: []RefExemplar{
+						{Ref: 10, T: 5000, V: 100.1, Labels: labels.FromStrings("trace_id", "abc1234")},
+					},
+				},
+				{
+					Ref: 11, ST: 0, T: 5000, V: 200.2,
+					Exemplars: []RefExemplar{
+						{Ref: 11, T: 5001, V: 200.2, Labels: labels.FromStrings("trace_id", "def5678", "span_id", "123")},
+					},
+				},
+			},
+		},
+		{
+			name: "multiple and mixed exemplars",
+			samples: []RefSampleV2{
+				{
+					Ref: 100, ST: 1000, T: 2000, V: 1.0,
+					Exemplars: []RefExemplar{
+						{Ref: 100, T: 2000, V: 1.0, Labels: labels.FromStrings("trace_id", "t1")},
+						{Ref: 100, T: 2005, V: 1.1, Labels: labels.FromStrings("trace_id", "t2", "env", "prod")},
+					},
+				},
+				{
+					Ref: 101, ST: 1000, T: 2010, V: 2.0,
+					Exemplars: nil,
+				},
+				{
+					Ref: 102, ST: 1000, T: 2020, V: 3.0,
+					Exemplars: []RefExemplar{
+						{Ref: 102, T: 2020, V: 3.0, Labels: labels.FromStrings("trace_id", "t3")},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded := enc.SamplesV2(tc.samples, nil)
+			require.Equal(t, SamplesV2, dec.Type(encoded))
+
+			// Decode with SamplesV2 (preserving exemplars)
+			decoded, err := dec.SamplesV2(encoded, nil)
+			require.NoError(t, err)
+			require.Equal(t, len(tc.samples), len(decoded))
+			for i, exp := range tc.samples {
+				got := decoded[i]
+				require.Equal(t, exp.Ref, got.Ref)
+				require.Equal(t, exp.ST, got.ST)
+				require.Equal(t, exp.T, got.T)
+				require.Equal(t, exp.V, got.V)
+				require.Equal(t, len(exp.Exemplars), len(got.Exemplars))
+				for j, exExp := range exp.Exemplars {
+					exGot := got.Exemplars[j]
+					require.Equal(t, exExp.Ref, exGot.Ref)
+					require.Equal(t, exExp.T, exGot.T)
+					require.Equal(t, exExp.V, exGot.V)
+					require.Equal(t, exExp.Labels.Map(), exGot.Labels.Map())
+				}
+			}
+
+			// Decode with Samples (zero-alloc stripping of exemplars)
+			stripped, err := dec.Samples(encoded, nil)
+			require.NoError(t, err)
+			require.Equal(t, len(tc.samples), len(stripped))
+			for i, exp := range tc.samples {
+				got := stripped[i]
+				require.Equal(t, exp.Ref, got.Ref)
+				require.Equal(t, exp.ST, got.ST)
+				require.Equal(t, exp.T, got.T)
+				require.Equal(t, exp.V, got.V)
+			}
+		})
+	}
+}
+
+func TestRefHistogramsV2(t *testing.T) {
+	dec := NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+	var enc Encoder
+
+	h1 := &histogram.Histogram{
+		Schema:          1,
+		Count:           50,
+		Sum:             12.5,
+		ZeroCount:       5,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 2}},
+		PositiveBuckets: []int64{10, 35},
+	}
+	h2 := &histogram.Histogram{
+		Schema:          2,
+		Count:           100,
+		Sum:             25.0,
+		ZeroCount:       10,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 1, Length: 2}},
+		PositiveBuckets: []int64{20, 70},
+	}
+
+	histograms := []RefHistogramSampleV2{
+		{
+			Ref: 50, ST: 100, T: 1000, H: h1,
+			Exemplars: []RefExemplar{
+				{Ref: 50, T: 1000, V: 5.5, Labels: labels.FromStrings("trace_id", "hist_trace_1")},
+				{Ref: 50, T: 1002, V: 7.0, Labels: labels.FromStrings("trace_id", "hist_trace_2")},
+			},
+		},
+		{
+			Ref: 51, ST: 100, T: 1010, H: h2,
+			Exemplars: nil,
+		},
+	}
+
+	encoded := enc.HistogramSamplesV2(histograms, nil)
+	require.Equal(t, HistogramSamplesV2, dec.Type(encoded))
+
+	decoded, err := dec.HistogramSamplesV2(encoded, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(histograms), len(decoded))
+	for i, exp := range histograms {
+		got := decoded[i]
+		require.Equal(t, exp.Ref, got.Ref)
+		require.Equal(t, exp.ST, got.ST)
+		require.Equal(t, exp.T, got.T)
+		require.Equal(t, exp.H.Schema, got.H.Schema)
+		require.Equal(t, exp.H.Count, got.H.Count)
+		require.Equal(t, exp.H.Sum, got.H.Sum)
+		require.Equal(t, len(exp.Exemplars), len(got.Exemplars))
+		for j, exExp := range exp.Exemplars {
+			exGot := got.Exemplars[j]
+			require.Equal(t, exExp.Ref, exGot.Ref)
+			require.Equal(t, exExp.T, exGot.T)
+			require.Equal(t, exExp.V, exGot.V)
+			require.Equal(t, exExp.Labels.Map(), exGot.Labels.Map())
+		}
+	}
+
+	// Stripped decoding
+	stripped, err := dec.HistogramSamples(encoded, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(histograms), len(stripped))
+	for i, exp := range histograms {
+		got := stripped[i]
+		require.Equal(t, exp.Ref, got.Ref)
+		require.Equal(t, exp.ST, got.ST)
+		require.Equal(t, exp.T, got.T)
+		require.Equal(t, exp.H.Schema, got.H.Schema)
+	}
+}
+
+func TestRefFloatHistogramsV2(t *testing.T) {
+	dec := NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+	var enc Encoder
+
+	fh1 := &histogram.FloatHistogram{
+		Schema:          1,
+		Count:           50.5,
+		Sum:             12.5,
+		ZeroCount:       5.5,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 2}},
+		PositiveBuckets: []float64{10.2, 34.8},
+	}
+	fh2 := &histogram.FloatHistogram{
+		Schema:          2,
+		Count:           100.0,
+		Sum:             25.0,
+		ZeroCount:       10.0,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 1, Length: 2}},
+		PositiveBuckets: []float64{20.0, 70.0},
+	}
+
+	histograms := []RefFloatHistogramSampleV2{
+		{
+			Ref: 60, ST: 200, T: 2000, FH: fh1,
+			Exemplars: []RefExemplar{
+				{Ref: 60, T: 2000, V: 15.5, Labels: labels.FromStrings("trace_id", "fh_trace_1")},
+			},
+		},
+		{
+			Ref: 61, ST: 200, T: 2010, FH: fh2,
+			Exemplars: nil,
+		},
+	}
+
+	encoded := enc.FloatHistogramSamplesV2(histograms, nil)
+	require.Equal(t, FloatHistogramSamplesV2, dec.Type(encoded))
+
+	decoded, err := dec.FloatHistogramSamplesV2(encoded, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(histograms), len(decoded))
+	for i, exp := range histograms {
+		got := decoded[i]
+		require.Equal(t, exp.Ref, got.Ref)
+		require.Equal(t, exp.ST, got.ST)
+		require.Equal(t, exp.T, got.T)
+		require.Equal(t, exp.FH.Schema, got.FH.Schema)
+		require.Equal(t, exp.FH.Count, got.FH.Count)
+		require.Equal(t, len(exp.Exemplars), len(got.Exemplars))
+		for j, exExp := range exp.Exemplars {
+			exGot := got.Exemplars[j]
+			require.Equal(t, exExp.Ref, exGot.Ref)
+			require.Equal(t, exExp.T, exGot.T)
+			require.Equal(t, exExp.V, exGot.V)
+			require.Equal(t, exExp.Labels.Map(), exGot.Labels.Map())
+		}
+	}
+
+	// Stripped decoding
+	stripped, err := dec.FloatHistogramSamples(encoded, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(histograms), len(stripped))
+	for i, exp := range histograms {
+		got := stripped[i]
+		require.Equal(t, exp.Ref, got.Ref)
+		require.Equal(t, exp.ST, got.ST)
+		require.Equal(t, exp.T, got.T)
+		require.Equal(t, exp.FH.Schema, got.FH.Schema)
+	}
+}
+
+func TestRefCustomBucketsHistogramsV2(t *testing.T) {
+	dec := NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+	var enc Encoder
+
+	hCustom := &histogram.Histogram{
+		Schema:          -53,
+		Count:           10,
+		Sum:             45.0,
+		ZeroThreshold:   0.001,
+		PositiveSpans:   []histogram.Span{{Offset: 0, Length: 3}},
+		PositiveBuckets: []int64{2, 3, 5},
+		CustomValues:    []float64{0, 10, 20, 50},
+	}
+
+	histograms := []RefCustomBucketsHistogramSampleV2{
+		{
+			Ref: 70, ST: 300, T: 3000, H: hCustom,
+			Exemplars: []RefExemplar{
+				{Ref: 70, T: 3000, V: 9.5, Labels: labels.FromStrings("trace_id", "cb_trace_1")},
+			},
+		},
+	}
+
+	encoded := enc.CustomBucketsHistogramSamplesV2(histograms, nil)
+	require.Equal(t, HistogramSamplesV2, dec.Type(encoded))
+
+	decoded, err := dec.CustomBucketsHistogramSamplesV2(encoded, nil)
+	require.NoError(t, err)
+	require.Equal(t, len(histograms), len(decoded))
+	for i, exp := range histograms {
+		got := decoded[i]
+		require.Equal(t, exp.Ref, got.Ref)
+		require.Equal(t, exp.ST, got.ST)
+		require.Equal(t, exp.T, got.T)
+		require.Equal(t, exp.H.Schema, got.H.Schema)
+		require.Equal(t, exp.H.CustomValues, got.H.CustomValues)
+		require.Equal(t, len(exp.Exemplars), len(got.Exemplars))
+		for j, exExp := range exp.Exemplars {
+			exGot := got.Exemplars[j]
+			require.Equal(t, exExp.Ref, exGot.Ref)
+			require.Equal(t, exExp.T, exGot.T)
+			require.Equal(t, exExp.V, exGot.V)
+			require.Equal(t, exExp.Labels.Map(), exGot.Labels.Map())
+		}
+	}
+}
+
+func BenchmarkRecord(b *testing.B) {
+	const numSamples = 1000
+	samples := make([]RefSampleV2, numSamples)
+	for i := range samples {
+		samples[i] = RefSampleV2{
+			Ref: chunks.HeadSeriesRef(i + 1),
+			ST:  1000,
+			T:   int64(i)*1000 + 1000,
+			V:   float64(i) * 1.5,
+			Exemplars: []RefExemplar{
+				{
+					Ref:    chunks.HeadSeriesRef(i + 1),
+					T:      int64(i)*1000 + 1000,
+					V:      float64(i) * 1.5,
+					Labels: labels.FromStrings("trace_id", "abc123456789", "span_id", "987654321"),
+				},
+			},
+		}
+	}
+
+	var enc Encoder
+	raw := enc.SamplesV2(samples, nil)
+	dec := NewDecoder(labels.NewSymbolTable(), promslog.NewNopLogger())
+
+	b.Run("DecodeSamplesV2_ZeroAllocStripping", func(b *testing.B) {
+		buf := make([]RefSample, 0, numSamples)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var err error
+			buf, err = dec.Samples(raw, buf[:0])
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		_ = buf
+	})
+
+	b.Run("DecodeRefSamplesV2", func(b *testing.B) {
+		buf := make([]RefSampleV2, 0, numSamples)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			var err error
+			buf, err = dec.SamplesV2(raw, buf[:0])
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+		_ = buf
+	})
+
+	b.Run("EncodeRefSamplesV2", func(b *testing.B) {
+		buf := make([]byte, 0, len(raw))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for b.Loop() {
+			buf = enc.SamplesV2(samples, buf[:0])
+		}
+		_ = buf
+	})
+}
+

@@ -151,14 +151,27 @@ func (a *headAppenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t i
 		s = a.bestEffortAppendSTZeroSample(s, ls, st, t, h, fh)
 	}
 
+	var attachedExemplars []record.RefExemplar
+	if len(opts.Exemplars) > 0 {
+		attachedExemplars = make([]record.RefExemplar, 0, len(opts.Exemplars))
+		for _, e := range opts.Exemplars {
+			attachedExemplars = append(attachedExemplars, record.RefExemplar{
+				Ref:    s.ref,
+				T:      e.Ts,
+				V:      e.Value,
+				Labels: e.Labels.WithoutEmpty(),
+			})
+		}
+	}
+
 	var appended *memSeries
 	switch {
 	case fh != nil:
 		isStale = value.IsStaleNaN(fh.Sum)
-		appended, appErr = a.appendFloatHistogram(s, st, t, fh, opts.RejectOutOfOrder)
+		appended, appErr = a.appendFloatHistogram(s, st, t, fh, opts.RejectOutOfOrder, attachedExemplars)
 	case h != nil:
 		isStale = value.IsStaleNaN(h.Sum)
-		appended, appErr = a.appendHistogram(s, st, t, h, opts.RejectOutOfOrder)
+		appended, appErr = a.appendHistogram(s, st, t, h, opts.RejectOutOfOrder, attachedExemplars)
 	default:
 		isStale = value.IsStaleNaN(v)
 		if isStale {
@@ -184,7 +197,7 @@ func (a *headAppenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t i
 			// we do not need to check for the difference between "unknown
 			// series" and "known series with stNone".
 		}
-		appended, appErr = a.appendFloat(s, st, t, v, opts.RejectOutOfOrder)
+		appended, appErr = a.appendFloat(s, st, t, v, opts.RejectOutOfOrder, attachedExemplars)
 	}
 	// Handle append error, if any.
 	if appErr != nil {
@@ -228,7 +241,7 @@ func (a *headAppenderV2) Append(ref storage.SeriesRef, ls labels.Labels, st, t i
 
 // appendFloat appends v to s, and returns the series the sample was appended to, which
 // may differ from s if s was garbage-collected in the meantime (see lockForAppend).
-func (a *headAppenderV2) appendFloat(s *memSeries, st, t int64, v float64, fastRejectOOO bool) (*memSeries, error) {
+func (a *headAppenderV2) appendFloat(s *memSeries, st, t int64, v float64, fastRejectOOO bool, exemplars []record.RefExemplar) (*memSeries, error) {
 	s, err := a.lockForAppend(s)
 	if err != nil {
 		return nil, err
@@ -252,14 +265,14 @@ func (a *headAppenderV2) appendFloat(s *memSeries, st, t int64, v float64, fastR
 	}
 
 	b := a.getCurrentBatch(stFloat, s.ref)
-	b.floats = append(b.floats, record.RefSample{Ref: s.ref, ST: st, T: t, V: v})
+	b.floatsV2 = append(b.floatsV2, record.RefSampleV2{Ref: s.ref, ST: st, T: t, V: v, Exemplars: exemplars})
 	b.floatSeries = append(b.floatSeries, s)
 	return s, nil
 }
 
 // appendHistogram appends h to s, and returns the series the sample was appended to,
 // which may differ from s if s was garbage-collected in the meantime (see lockForAppend).
-func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram.Histogram, fastRejectOOO bool) (*memSeries, error) {
+func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram.Histogram, fastRejectOOO bool, exemplars []record.RefExemplar) (*memSeries, error) {
 	s, err := a.lockForAppend(s)
 	if err != nil {
 		return nil, err
@@ -286,7 +299,7 @@ func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram
 		sTyp = stCustomBucketHistogram
 	}
 	b := a.getCurrentBatch(sTyp, s.ref)
-	b.histograms = append(b.histograms, record.RefHistogramSample{Ref: s.ref, ST: st, T: t, H: h})
+	b.histogramsV2 = append(b.histogramsV2, record.RefHistogramSampleV2{Ref: s.ref, ST: st, T: t, H: h, Exemplars: exemplars})
 	b.histogramSeries = append(b.histogramSeries, s)
 	return s, nil
 }
@@ -294,7 +307,7 @@ func (a *headAppenderV2) appendHistogram(s *memSeries, st, t int64, h *histogram
 // appendFloatHistogram appends fh to s, and returns the series the sample was appended
 // to, which may differ from s if s was garbage-collected in the meantime (see
 // lockForAppend).
-func (a *headAppenderV2) appendFloatHistogram(s *memSeries, st, t int64, fh *histogram.FloatHistogram, fastRejectOOO bool) (*memSeries, error) {
+func (a *headAppenderV2) appendFloatHistogram(s *memSeries, st, t int64, fh *histogram.FloatHistogram, fastRejectOOO bool, exemplars []record.RefExemplar) (*memSeries, error) {
 	s, err := a.lockForAppend(s)
 	if err != nil {
 		return nil, err
@@ -321,7 +334,7 @@ func (a *headAppenderV2) appendFloatHistogram(s *memSeries, st, t int64, fh *his
 		sTyp = stCustomBucketFloatHistogram
 	}
 	b := a.getCurrentBatch(sTyp, s.ref)
-	b.floatHistograms = append(b.floatHistograms, record.RefFloatHistogramSample{Ref: s.ref, ST: st, T: t, FH: fh})
+	b.floatHistogramsV2 = append(b.floatHistogramsV2, record.RefFloatHistogramSampleV2{Ref: s.ref, ST: st, T: t, FH: fh, Exemplars: exemplars})
 	b.floatHistogramSeries = append(b.floatHistogramSeries, s)
 	return s, nil
 }
@@ -356,7 +369,6 @@ func (a *headAppenderV2) appendExemplars(s *memSeries, exemplar []exemplar.Exemp
 // is implemented.
 //
 // ST is an experimental feature, we don't fail the append on errors, just debug log.
-//
 // It returns the series the zero sample was appended to, which may differ from s if s was
 // garbage-collected in the meantime (see lockForAppend).
 func (a *headAppenderV2) bestEffortAppendSTZeroSample(s *memSeries, ls labels.Labels, st, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) *memSeries {
@@ -384,7 +396,7 @@ func (a *headAppenderV2) bestEffortAppendSTZeroSample(s *memSeries, ls labels.La
 			ZeroThreshold: fh.ZeroThreshold,
 			CustomValues:  fh.CustomValues,
 		}
-		appended, err = a.appendFloatHistogram(s, 0, st, zeroFloatHistogram, true)
+		appended, err = a.appendFloatHistogram(s, 0, st, zeroFloatHistogram, true, nil)
 	case h != nil:
 		zeroHistogram := &histogram.Histogram{
 			// The STZeroSample represents a counter reset by definition.
@@ -394,9 +406,9 @@ func (a *headAppenderV2) bestEffortAppendSTZeroSample(s *memSeries, ls labels.La
 			ZeroThreshold: h.ZeroThreshold,
 			CustomValues:  h.CustomValues,
 		}
-		appended, err = a.appendHistogram(s, 0, st, zeroHistogram, true)
+		appended, err = a.appendHistogram(s, 0, st, zeroHistogram, true, nil)
 	default:
-		appended, err = a.appendFloat(s, 0, st, 0, true)
+		appended, err = a.appendFloat(s, 0, st, 0, true, nil)
 	}
 
 	if err != nil {

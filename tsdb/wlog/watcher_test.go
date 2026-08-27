@@ -99,6 +99,24 @@ func (wtm *writeToMock) Append(s []record.RefSample) bool {
 	return true
 }
 
+func (wtm *writeToMock) AppendSamplesV2(s []record.RefSampleV2) bool {
+	wtm.mu.Lock()
+	defer wtm.mu.Unlock()
+
+	wtm.sampleAppends++
+	for _, sample := range s {
+		wtm.samplesAppended = append(wtm.samplesAppended, record.RefSample{
+			Ref: sample.Ref,
+			ST:  sample.ST,
+			T:   sample.T,
+			V:   sample.V,
+		})
+		wtm.exemplarsAppended = append(wtm.exemplarsAppended, sample.Exemplars...)
+	}
+	time.Sleep(wtm.delay)
+	return true
+}
+
 func (wtm *writeToMock) AppendExemplars(e []record.RefExemplar) bool {
 	wtm.mu.Lock()
 	defer wtm.mu.Unlock()
@@ -119,6 +137,24 @@ func (wtm *writeToMock) AppendHistograms(h []record.RefHistogramSample) bool {
 	return true
 }
 
+func (wtm *writeToMock) AppendHistogramsV2(h []record.RefHistogramSampleV2) bool {
+	wtm.mu.Lock()
+	defer wtm.mu.Unlock()
+
+	time.Sleep(wtm.delay)
+	wtm.histogramAppends++
+	for _, sample := range h {
+		wtm.histogramsAppended = append(wtm.histogramsAppended, record.RefHistogramSample{
+			Ref: sample.Ref,
+			ST:  sample.ST,
+			T:   sample.T,
+			H:   sample.H,
+		})
+		wtm.exemplarsAppended = append(wtm.exemplarsAppended, sample.Exemplars...)
+	}
+	return true
+}
+
 func (wtm *writeToMock) AppendFloatHistograms(fh []record.RefFloatHistogramSample) bool {
 	wtm.mu.Lock()
 	defer wtm.mu.Unlock()
@@ -126,6 +162,24 @@ func (wtm *writeToMock) AppendFloatHistograms(fh []record.RefFloatHistogramSampl
 	time.Sleep(wtm.delay)
 	wtm.floatHistogramsAppends++
 	wtm.floatHistogramsAppended = append(wtm.floatHistogramsAppended, fh...)
+	return true
+}
+
+func (wtm *writeToMock) AppendFloatHistogramsV2(fh []record.RefFloatHistogramSampleV2) bool {
+	wtm.mu.Lock()
+	defer wtm.mu.Unlock()
+
+	time.Sleep(wtm.delay)
+	wtm.floatHistogramsAppends++
+	for _, sample := range fh {
+		wtm.floatHistogramsAppended = append(wtm.floatHistogramsAppended, record.RefFloatHistogramSample{
+			Ref: sample.Ref,
+			ST:  sample.ST,
+			T:   sample.T,
+			FH:  sample.FH,
+		})
+		wtm.exemplarsAppended = append(wtm.exemplarsAppended, sample.Exemplars...)
+	}
 	return true
 }
 
@@ -899,4 +953,111 @@ func TestRun_AvoidNotifyWhenBehind(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestWALWatcher_CompoundRecordsStreaming(t *testing.T) {
+	// Test case 1: sendExemplars = true -> captures attached exemplars in AppendSamplesV2
+	t.Run("sendExemplars=true", func(t *testing.T) {
+		now := time.Now()
+		ts := timestamp.FromTime(now.Add(1 * time.Second))
+		dir := t.TempDir()
+		wdir := path.Join(dir, "wal")
+		require.NoError(t, os.Mkdir(wdir, 0o777))
+
+		w, err := NewSize(nil, nil, wdir, 32768, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, w.Close())
+		})
+
+		wt := newWriteToMock(0)
+		watcher := NewWatcher(wMetrics, nil, nil, "test", wt, dir, true, true, false, nil)
+		watcher.SetStartTime(now)
+		watcher.Start()
+		t.Cleanup(watcher.Stop)
+
+		var enc record.Encoder
+		// 1. Log Series
+		series := []record.RefSeries{
+			{Ref: 1, Labels: labels.FromStrings("__name__", "http_requests", "job", "api")},
+		}
+		require.NoError(t, w.Log(enc.Series(series, nil)))
+
+		// 2. Log SamplesV2 with attached exemplar
+		samplesV2 := []record.RefSampleV2{
+			{
+				Ref: 1, ST: 500, T: ts, V: 42.0,
+				Exemplars: []record.RefExemplar{
+					{Ref: 1, T: ts, V: 42.0, Labels: labels.FromStrings("trace_id", "watcher-trace-1")},
+				},
+			},
+		}
+		require.NoError(t, w.Log(enc.SamplesV2(samplesV2, nil)))
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+		watcher.Notify()
+
+		require.Eventually(t, func() bool {
+			wt.mu.Lock()
+			defer wt.mu.Unlock()
+			return len(wt.samplesAppended) >= 1 && len(wt.exemplarsAppended) >= 1
+		}, 10*time.Second, 50*time.Millisecond)
+
+		wt.mu.Lock()
+		defer wt.mu.Unlock()
+		require.Equal(t, 1, len(wt.samplesAppended))
+		require.Equal(t, 1, len(wt.exemplarsAppended))
+		require.Equal(t, "watcher-trace-1", wt.exemplarsAppended[0].Labels.Get("trace_id"))
+	})
+
+	// Test case 2: sendExemplars = false -> strips exemplars, calls Append
+	t.Run("sendExemplars=false", func(t *testing.T) {
+		now := time.Now()
+		ts := timestamp.FromTime(now.Add(1 * time.Second))
+		dir := t.TempDir()
+		wdir := path.Join(dir, "wal")
+		require.NoError(t, os.Mkdir(wdir, 0o777))
+
+		w, err := NewSize(nil, nil, wdir, 32768, compression.None)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			require.NoError(t, w.Close())
+		})
+
+		wt := newWriteToMock(0)
+		watcher := NewWatcher(wMetrics, nil, nil, "test", wt, dir, false, false, false, nil)
+		watcher.SetStartTime(now)
+		watcher.Start()
+		t.Cleanup(watcher.Stop)
+
+		var enc record.Encoder
+		series := []record.RefSeries{
+			{Ref: 1, Labels: labels.FromStrings("__name__", "http_requests", "job", "api")},
+		}
+		require.NoError(t, w.Log(enc.Series(series, nil)))
+
+		samplesV2 := []record.RefSampleV2{
+			{
+				Ref: 1, ST: 500, T: ts, V: 42.0,
+				Exemplars: []record.RefExemplar{
+					{Ref: 1, T: ts, V: 42.0, Labels: labels.FromStrings("trace_id", "watcher-trace-1")},
+				},
+			},
+		}
+		require.NoError(t, w.Log(enc.SamplesV2(samplesV2, nil)))
+		_, err = w.NextSegment()
+		require.NoError(t, err)
+		watcher.Notify()
+
+		require.Eventually(t, func() bool {
+			wt.mu.Lock()
+			defer wt.mu.Unlock()
+			return len(wt.samplesAppended) >= 1
+		}, 10*time.Second, 50*time.Millisecond)
+
+		wt.mu.Lock()
+		defer wt.mu.Unlock()
+		require.Equal(t, 1, len(wt.samplesAppended))
+		require.Equal(t, 0, len(wt.exemplarsAppended))
+	})
 }
