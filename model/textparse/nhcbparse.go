@@ -14,6 +14,7 @@
 package textparse
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"math"
@@ -104,6 +105,19 @@ type NHCBParser struct {
 	lastHistogramLabelsHash uint64
 	// Reused buffer for hashing labels.
 	hBuffer []byte
+
+	// Reusable scratch buffer and subslices for fast-path matching of consecutive
+	// classic histogram lines.
+	fastPathBuf              []byte
+	sumStart                 int
+	sumEnd                   int
+	countStart               int
+	countEnd                 int
+	bucketPrefix             []byte
+	bucketSuffix             []byte
+	sumLine                  []byte
+	countLine                []byte
+	needBucketFastPathUpdate bool
 }
 
 func NewNHCBParser(p Parser, st *labels.SymbolTable, keepClassicHistograms, parseST bool) Parser {
@@ -113,6 +127,7 @@ func NewNHCBParser(p Parser, st *labels.SymbolTable, keepClassicHistograms, pars
 		parseST:               parseST,
 		builder:               labels.NewScratchBuilderWithSymbolTable(st, 16),
 		tempNHCB:              convertnhcb.NewTempHistogram(),
+		fastPathBuf:           make([]byte, 0, 256),
 	}
 }
 
@@ -201,15 +216,25 @@ func (p *NHCBParser) Next() (Entry, error) {
 		switch p.entry {
 		case EntrySeries:
 			p.bytes, p.ts, p.value = p.parser.Series()
+			if p.state == stateCollecting && p.tryFastPathClassicHistogramSeries() {
+				if !p.keepClassicHistograms {
+					continue
+				}
+				p.parser.Labels(&p.lset)
+				return p.entry, p.err
+			}
 			p.parser.Labels(&p.lset)
 			var isNHCB bool
 			switch p.state {
 			case stateCollecting:
-				if p.differentMetric() && p.processNHCB() {
-					// We are collecting classic series, but the next series
-					// has different type or labels. If we can convert what
-					// we have collected so far to NHCB, then we can return it.
-					return EntryHistogram, nil
+				if p.differentMetric() {
+					if p.processNHCB() {
+						// We are collecting classic series, but the next series
+						// has different type or labels. If we can convert what
+						// we have collected so far to NHCB, then we can return it.
+						return EntryHistogram, nil
+					}
+					p.clearFastPath()
 				}
 				isNHCB = p.handleClassicHistogramSeries(p.lset)
 			case stateInhibiting:
@@ -249,6 +274,43 @@ func (p *NHCBParser) Next() (Entry, error) {
 		}
 		return p.entry, p.err
 	}
+}
+
+// tryFastPathClassicHistogramSeries attempts to match the current series bytes against
+// the cached prefix/suffix/lines of the classic histogram currently being collected,
+// avoiding full label parsing and hashing on consecutive lines.
+func (p *NHCBParser) tryFastPathClassicHistogramSeries() bool {
+	if p.typ != model.MetricTypeHistogram {
+		return false
+	}
+	if len(p.bucketPrefix) > 0 &&
+		len(p.bytes) > len(p.bucketPrefix)+len(p.bucketSuffix) &&
+		bytes.HasPrefix(p.bytes, p.bucketPrefix) &&
+		bytes.HasSuffix(p.bytes, p.bucketSuffix) {
+		leBytes := p.bytes[len(p.bucketPrefix) : len(p.bytes)-len(p.bucketSuffix)]
+		if bytes.IndexByte(leBytes, '"') == -1 && bytes.IndexByte(leBytes, '\\') == -1 {
+			le, err := strconv.ParseFloat(yoloString(leBytes), 64)
+			if err == nil && !math.IsNaN(le) {
+				if le == 0 {
+					le = 0
+				}
+				p.storeExemplars()
+				_ = p.tempNHCB.SetBucketCount(le, p.value)
+				return true
+			}
+		}
+	}
+	if len(p.sumLine) > 0 && bytes.Equal(p.bytes, p.sumLine) {
+		p.storeExemplars()
+		_ = p.tempNHCB.SetSum(p.value)
+		return true
+	}
+	if len(p.countLine) > 0 && bytes.Equal(p.bytes, p.countLine) {
+		p.storeExemplars()
+		_ = p.tempNHCB.SetCount(p.value)
+		return true
+	}
+	return false
 }
 
 // Return true if labels have changed and we should emit the NHCB.
@@ -301,18 +363,22 @@ func (p *NHCBParser) handleClassicHistogramSeries(lset labels.Labels) bool {
 		}
 		le, err := strconv.ParseFloat(lset.Get(labels.BucketLabel), 64)
 		if err == nil && !math.IsNaN(le) {
-			p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+			wasCollecting := p.state == stateCollecting
+			p.processClassicHistogramSeries(lset, name, suffixType, func(hist *convertnhcb.TempHistogram) {
 				_ = hist.SetBucketCount(le, p.value)
 			})
+			if wasCollecting {
+				p.updateBucketFastPath(name)
+			}
 			return true
 		}
 	case convertnhcb.SuffixCount:
-		p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+		p.processClassicHistogramSeries(lset, name, suffixType, func(hist *convertnhcb.TempHistogram) {
 			_ = hist.SetCount(p.value)
 		})
 		return true
 	case convertnhcb.SuffixSum:
-		p.processClassicHistogramSeries(lset, name, func(hist *convertnhcb.TempHistogram) {
+		p.processClassicHistogramSeries(lset, name, suffixType, func(hist *convertnhcb.TempHistogram) {
 			_ = hist.SetSum(p.value)
 		})
 		return true
@@ -320,7 +386,7 @@ func (p *NHCBParser) handleClassicHistogramSeries(lset labels.Labels) bool {
 	return false
 }
 
-func (p *NHCBParser) processClassicHistogramSeries(lset labels.Labels, name string, updateHist func(*convertnhcb.TempHistogram)) {
+func (p *NHCBParser) processClassicHistogramSeries(lset labels.Labels, name string, suffixType convertnhcb.SuffixType, updateHist func(*convertnhcb.TempHistogram)) {
 	if p.state != stateCollecting {
 		p.storeClassicLabels(name)
 		if p.parseST {
@@ -330,9 +396,232 @@ func (p *NHCBParser) processClassicHistogramSeries(lset labels.Labels, name stri
 		}
 		p.state = stateCollecting
 		p.tempLsetNHCB = convertnhcb.GetHistogramMetricBase(lset, name)
+		p.initFastPath(name, suffixType)
 	}
 	p.storeExemplars()
 	updateHist(&p.tempNHCB)
+}
+
+// hasLeLabel checks if b contains a label named "le".
+func hasLeLabel(b []byte) bool {
+	for i := 0; i < len(b); {
+		idx := bytes.Index(b[i:], []byte("le"))
+		if idx == -1 {
+			return false
+		}
+		pos := i + idx
+		beforeOK := pos == 0 || b[pos-1] == ',' || b[pos-1] == '{' || b[pos-1] == ' ' || b[pos-1] == '\t' || b[pos-1] == '"'
+		afterPos := pos + 2
+		afterOK := afterPos < len(b) && (b[afterPos] == '=' || b[afterPos] == ' ' || b[afterPos] == '\t' || b[afterPos] == '"')
+		if beforeOK && afterOK {
+			return true
+		}
+		i = pos + 2
+	}
+	return false
+}
+
+// splitBucketLabels splits the label bytes inside {...} of a _bucket series around the "le" label.
+func splitBucketLabels(insideBraces []byte) (beforeLe, afterLe []byte, ok bool) {
+	// Case 1: le is the only label: le="<val>".
+	if bytes.HasPrefix(insideBraces, []byte(`le="`)) && insideBraces[len(insideBraces)-1] == '"' {
+		leVal := insideBraces[4 : len(insideBraces)-1]
+		if bytes.IndexByte(leVal, '"') == -1 && bytes.IndexByte(leVal, '\\') == -1 {
+			return nil, nil, true
+		}
+	}
+	// Case 2: le is the last label: <before>,le="<val>".
+	if idx := bytes.LastIndex(insideBraces, []byte(`,le="`)); idx >= 0 && insideBraces[len(insideBraces)-1] == '"' {
+		leVal := insideBraces[idx+5 : len(insideBraces)-1]
+		if bytes.IndexByte(leVal, '"') == -1 && bytes.IndexByte(leVal, '\\') == -1 {
+			before := insideBraces[:idx]
+			if !hasLeLabel(before) {
+				return before, nil, true
+			}
+		}
+	}
+	// Case 3: le is the first label: le="<val>",<after>.
+	if bytes.HasPrefix(insideBraces, []byte(`le="`)) {
+		if endIdx := bytes.Index(insideBraces[4:], []byte(`",`)); endIdx >= 0 {
+			leVal := insideBraces[4 : 4+endIdx]
+			if bytes.IndexByte(leVal, '"') == -1 && bytes.IndexByte(leVal, '\\') == -1 {
+				after := insideBraces[4+endIdx+2:]
+				if len(after) > 0 && !hasLeLabel(after) {
+					return nil, after, true
+				}
+			}
+		}
+	}
+	// Case 4: le is in the middle: <before>,le="<val>",<after>.
+	if idx := bytes.Index(insideBraces, []byte(`,le="`)); idx >= 0 {
+		if endIdx := bytes.Index(insideBraces[idx+5:], []byte(`",`)); endIdx >= 0 {
+			leVal := insideBraces[idx+5 : idx+5+endIdx]
+			if bytes.IndexByte(leVal, '"') == -1 && bytes.IndexByte(leVal, '\\') == -1 {
+				before := insideBraces[:idx]
+				after := insideBraces[idx+5+endIdx+2:]
+				if len(before) > 0 && len(after) > 0 && !hasLeLabel(before) && !hasLeLabel(after) {
+					return before, after, true
+				}
+			}
+		}
+	}
+	return nil, nil, false
+}
+
+// clearFastPath resets all fast-path matching state for consecutive classic histogram series.
+func (p *NHCBParser) clearFastPath() {
+	p.sumLine = nil
+	p.countLine = nil
+	p.bucketPrefix = nil
+	p.bucketSuffix = nil
+	p.countEnd = 0
+	p.needBucketFastPathUpdate = false
+}
+
+// initFastPath populates fastPathBuf with expected _sum, _count, and _bucket byte patterns.
+func (p *NHCBParser) initFastPath(name string, suffixType convertnhcb.SuffixType) {
+	p.fastPathBuf = p.fastPathBuf[:0]
+	p.clearFastPath()
+
+	if !bytes.HasPrefix(p.bytes, yoloBytes(name)) {
+		return
+	}
+	afterName := p.bytes[len(name):]
+
+	var beforeLe, afterLe []byte
+	var ok bool
+	switch suffixType {
+	case convertnhcb.SuffixBucket:
+		if !bytes.HasPrefix(afterName, []byte("_bucket{")) || afterName[len(afterName)-1] != '}' {
+			return
+		}
+		insideBraces := afterName[len("_bucket{") : len(afterName)-1]
+		beforeLe, afterLe, ok = splitBucketLabels(insideBraces)
+		if !ok {
+			return
+		}
+	case convertnhcb.SuffixCount, convertnhcb.SuffixSum:
+		suffixStr := "_count"
+		if suffixType == convertnhcb.SuffixSum {
+			suffixStr = "_sum"
+		}
+		if !bytes.HasPrefix(afterName, yoloBytes(suffixStr)) {
+			return
+		}
+		rest := afterName[len(suffixStr):]
+		if len(rest) == 0 {
+			beforeLe, afterLe, ok = nil, nil, true
+		} else if len(rest) >= 2 && rest[0] == '{' && rest[len(rest)-1] == '}' {
+			otherLabels := rest[1 : len(rest)-1]
+			if !hasLeLabel(otherLabels) {
+				beforeLe, afterLe, ok = otherLabels, nil, true
+			}
+		}
+		if !ok {
+			return
+		}
+		p.needBucketFastPathUpdate = true
+	default:
+		return
+	}
+
+	p.sumStart = len(p.fastPathBuf)
+	p.fastPathBuf = append(p.fastPathBuf, name...)
+	p.fastPathBuf = append(p.fastPathBuf, "_sum"...)
+	if len(beforeLe) > 0 || len(afterLe) > 0 {
+		p.fastPathBuf = append(p.fastPathBuf, '{')
+		p.fastPathBuf = append(p.fastPathBuf, beforeLe...)
+		if len(beforeLe) > 0 && len(afterLe) > 0 {
+			p.fastPathBuf = append(p.fastPathBuf, ',')
+		}
+		p.fastPathBuf = append(p.fastPathBuf, afterLe...)
+		p.fastPathBuf = append(p.fastPathBuf, '}')
+	}
+	p.sumEnd = len(p.fastPathBuf)
+
+	p.countStart = len(p.fastPathBuf)
+	p.fastPathBuf = append(p.fastPathBuf, name...)
+	p.fastPathBuf = append(p.fastPathBuf, "_count"...)
+	if len(beforeLe) > 0 || len(afterLe) > 0 {
+		p.fastPathBuf = append(p.fastPathBuf, '{')
+		p.fastPathBuf = append(p.fastPathBuf, beforeLe...)
+		if len(beforeLe) > 0 && len(afterLe) > 0 {
+			p.fastPathBuf = append(p.fastPathBuf, ',')
+		}
+		p.fastPathBuf = append(p.fastPathBuf, afterLe...)
+		p.fastPathBuf = append(p.fastPathBuf, '}')
+	}
+	p.countEnd = len(p.fastPathBuf)
+
+	p.appendBucketFastPath(name, beforeLe, afterLe)
+}
+
+// appendBucketFastPath appends bucketPrefix and bucketSuffix to fastPathBuf and refreshes slice references.
+func (p *NHCBParser) appendBucketFastPath(name string, beforeLe, afterLe []byte) {
+	prefixStart := len(p.fastPathBuf)
+	p.fastPathBuf = append(p.fastPathBuf, name...)
+	p.fastPathBuf = append(p.fastPathBuf, "_bucket{"...)
+	if len(beforeLe) > 0 {
+		p.fastPathBuf = append(p.fastPathBuf, beforeLe...)
+		p.fastPathBuf = append(p.fastPathBuf, ',')
+	}
+	p.fastPathBuf = append(p.fastPathBuf, `le="`...)
+	prefixEnd := len(p.fastPathBuf)
+
+	suffixStart := len(p.fastPathBuf)
+	p.fastPathBuf = append(p.fastPathBuf, '"')
+	if len(afterLe) > 0 {
+		p.fastPathBuf = append(p.fastPathBuf, ',')
+		p.fastPathBuf = append(p.fastPathBuf, afterLe...)
+	}
+	p.fastPathBuf = append(p.fastPathBuf, '}')
+	suffixEnd := len(p.fastPathBuf)
+
+	p.sumLine = p.fastPathBuf[p.sumStart:p.sumEnd]
+	p.countLine = p.fastPathBuf[p.countStart:p.countEnd]
+	p.bucketPrefix = p.fastPathBuf[prefixStart:prefixEnd]
+	p.bucketSuffix = p.fastPathBuf[suffixStart:suffixEnd]
+}
+
+// sumLineMatches verifies that the non-le label bytes from a _bucket series match p.sumLine.
+func (p *NHCBParser) sumLineMatches(name string, beforeLe, afterLe []byte) bool {
+	if len(beforeLe) == 0 && len(afterLe) == 0 {
+		return len(p.sumLine) == len(name)+len("_sum")
+	}
+	headerLen := len(name) + len("_sum{")
+	if len(p.sumLine) < headerLen+1 || p.sumLine[len(p.sumLine)-1] != '}' {
+		return false
+	}
+	expectedLabels := p.sumLine[headerLen : len(p.sumLine)-1]
+	if len(beforeLe) > 0 && len(afterLe) == 0 {
+		return bytes.Equal(expectedLabels, beforeLe)
+	}
+	if len(beforeLe) == 0 && len(afterLe) > 0 {
+		return bytes.Equal(expectedLabels, afterLe)
+	}
+	return len(expectedLabels) == len(beforeLe)+1+len(afterLe) &&
+		bytes.HasPrefix(expectedLabels, beforeLe) &&
+		expectedLabels[len(beforeLe)] == ',' &&
+		bytes.HasSuffix(expectedLabels, afterLe)
+}
+
+// updateBucketFastPath updates bucketPrefix and bucketSuffix from a bucket line when collection started on _count/_sum.
+func (p *NHCBParser) updateBucketFastPath(name string) {
+	if !p.needBucketFastPathUpdate || p.countEnd == 0 || !bytes.HasPrefix(p.bytes, yoloBytes(name)) {
+		return
+	}
+	afterName := p.bytes[len(name):]
+	if !bytes.HasPrefix(afterName, []byte("_bucket{")) || afterName[len(afterName)-1] != '}' {
+		return
+	}
+	insideBraces := afterName[len("_bucket{") : len(afterName)-1]
+	beforeLe, afterLe, ok := splitBucketLabels(insideBraces)
+	if !ok || !p.sumLineMatches(name, beforeLe, afterLe) {
+		return
+	}
+	p.needBucketFastPathUpdate = false
+	p.fastPathBuf = p.fastPathBuf[:p.countEnd]
+	p.appendBucketFastPath(name, beforeLe, afterLe)
 }
 
 func (p *NHCBParser) storeExemplars() {
@@ -366,6 +655,7 @@ func (p *NHCBParser) processNHCB() bool {
 	if p.state != stateCollecting {
 		return false
 	}
+	p.clearFastPath()
 	h, fh, err := p.tempNHCB.Convert()
 	if err == nil {
 		if h != nil {
